@@ -4,18 +4,20 @@ import { GoogleGenAI, ThinkingLevel, Type } from '@google/genai';
 
 // Official supported Gemini Flash models (fast, free-tier eligible, structured JSON output supported)
 const SUPPORTED_GEMINI_MODELS = [
-  'gemini-3-flash-preview',
   'gemini-flash-latest',
+  'gemini-3-flash-preview',
+  'gemini-3.1-flash-lite',
   'gemini-3.8-flash',
 ];
 const configuredModel = (process.env.GEMINI_MODEL || '').trim();
 const ACTIVE_GEMINI_MODEL = SUPPORTED_GEMINI_MODELS.includes(configuredModel)
   ? configuredModel
-  : 'gemini-3-flash-preview';
+  : 'gemini-flash-latest';
 
 // Per-call timeout and bounded replacement passes so serverless functions never hang or loop infinitely
-const GEMINI_TIMEOUT_MS = 15000;
+const GEMINI_TIMEOUT_MS = 25000;
 const MAX_GENERATION_PASSES = 3;
+const MAX_QUESTIONS_PER_CHUNK = 7;
 
 export const config = {
   maxDuration: 30,
@@ -150,7 +152,7 @@ async function generateContentWithModelFallback(
       // Configure low-latency thinking per model family so structured JSON generation completes in ~2-4s
       const thinkingConfig = modelName.startsWith('gemini-3')
         ? { thinkingLevel: ThinkingLevel.LOW }
-        : modelName.startsWith('gemini-2.5')
+        : modelName.startsWith('gemini-2.5') || modelName === 'gemini-flash-latest'
         ? { thinkingBudget: 0 }
         : undefined;
 
@@ -171,15 +173,21 @@ async function generateContentWithModelFallback(
       return { response, modelUsed: modelName };
     } catch (err: any) {
       lastError = err;
-      logServerError(`Gemini model ${modelName} call failed`, err, { modelName, attempt: i + 1 });
       const msg = String(err?.message || err || '').toLowerCase();
-      // If API key itself is invalid, fail immediately
+      // If API key itself is invalid, log and fail immediately without trying fallback models
       if (msg.includes('api_key_invalid') || msg.includes('api key not valid')) {
+        logServerError('Gemini API key rejected', err, { modelName });
         break;
       }
-      // Brief backoff before trying the next fallback model
       if (i < candidateModels.length - 1) {
-        await sleep(250);
+        console.info(
+          `[IQ Quiz Server] Model ${modelName} attempt ${i + 1} did not complete (${err?.message || 'error'}); falling back to ${candidateModels[i + 1]}`
+        );
+        await sleep(200);
+      } else {
+        logServerError('All Gemini candidate models failed', err, {
+          triedModels: candidateModels,
+        });
       }
     }
   }
@@ -1199,7 +1207,8 @@ CRITICAL GENERATION RULES:
 2. Even if the subject is Bangla, English, or Hindi, you MUST write the question stem, options, hint, and explanation strictly in "${langName}" while testing the academic curriculum of "${subject}" for Class ${classLevel}.
 3. Every question must be 100% factually, scientifically, and mathematically accurate for Class ${classLevel}. Double-check all calculations so the option at correctIndex is indisputably right.
 4. ZERO DUPLICATES & HIGH DIVERSITY: Never repeat or paraphrase any previously asked question stem or concept key listed in the prompt. Vary the concepts, scenarios, examples, numerical values, and reasoning tasks across every question.
-5. For questionType "${questionType}": if "mcq", provide 4 distinct, plausible options and correctIndex (0-3). If "tf", provide 2 options (True/False in ${langName}) and correctIndex (0 or 1). If "mixed", include a mix of "mcq" and "tf" questions.`;
+5. Keep each explanation concise (1-2 clear sentences) and each hint brief (1 short sentence).
+6. For questionType "${questionType}": if "mcq", provide 4 distinct, plausible options and correctIndex (0-3). If "tf", provide 2 options (True/False in ${langName}) and correctIndex (0 or 1). If "mixed", include a mix of "mcq" and "tf" questions.`;
 
     const exclusionSection =
       recentConceptKeys.length > 0 || recentQuestionStems.length > 0 || rejectedStemsThisRun.length > 0
@@ -1220,97 +1229,128 @@ ${
 }\n`
         : '';
 
-    const prompt = `${
-      pass > 1
-        ? `[REPLACEMENT GENERATION PASS #${pass}]: Some questions in the previous pass overlapped with the student's quiz history. Generate ${batchRequestCount} BRAND-NEW, completely different replacement questions.\n`
-        : ''
-    }Generate exactly ${batchRequestCount} unique, fresh quiz questions for:
+    // Split large question requests into parallel sub-batches (max 7 per call) so generation completes in ~3s without timing out
+    const chunkDescriptors: { count: number; slots: string[]; chunkIndex: number }[] = [];
+    for (let offset = 0, cIdx = 0; offset < batchRequestCount; offset += MAX_QUESTIONS_PER_CHUNK, cIdx++) {
+      const sliceSlots = slotAssignments.slice(offset, offset + MAX_QUESTIONS_PER_CHUNK);
+      chunkDescriptors.push({
+        count: sliceSlots.length,
+        slots: sliceSlots,
+        chunkIndex: cIdx,
+      });
+    }
+
+    const questionItemSchema = {
+      type: Type.ARRAY,
+      items: {
+        type: Type.OBJECT,
+        properties: {
+          questionText: {
+            type: Type.STRING,
+            description: `Full question text written in ${langName}`,
+          },
+          questionType: {
+            type: Type.STRING,
+            description: 'Either "mcq" or "tf"',
+          },
+          options: {
+            type: Type.ARRAY,
+            items: { type: Type.STRING },
+            description: '4 distinct options for mcq, or 2 options for tf',
+          },
+          correctIndex: {
+            type: Type.INTEGER,
+            description: '0-based index of the single correct option',
+          },
+          explanation: {
+            type: Type.STRING,
+            description: `Concise 1-2 sentence explanation of why the correct option is right, in ${langName}`,
+          },
+          hint: {
+            type: Type.STRING,
+            description: `Short 1-sentence helpful hint without giving away the answer, in ${langName}`,
+          },
+          topic: {
+            type: Type.STRING,
+            description: 'Specific chapter or subtopic name',
+          },
+          difficulty: {
+            type: Type.STRING,
+            description: 'easy, medium, or hard',
+          },
+          conceptKey: {
+            type: Type.STRING,
+            description:
+              'Specific snake_case identifier of the exact academic concept & scenario tested',
+          },
+        },
+        required: [
+          'questionText',
+          'questionType',
+          'options',
+          'correctIndex',
+          'explanation',
+          'topic',
+          'difficulty',
+          'conceptKey',
+        ],
+      },
+    };
+
+    const chunkResults = await Promise.allSettled(
+      chunkDescriptors.map(async (chunk) => {
+        const chunkPrompt = `${
+          pass > 1
+            ? `[REPLACEMENT GENERATION PASS #${pass}]: Generate ${chunk.count} BRAND-NEW, completely different replacement questions.\n`
+            : ''
+        }Generate exactly ${chunk.count} unique, fresh quiz questions for:
 - Class Level: Class ${classLevel}
 - Academic Subject: ${subject}
 - Selected Topic/Chapter: ${topic}
 - Difficulty Level: ${difficulty}
 - Question Type: ${questionType}
 - Presentation Language: ${langName} (language code: ${quizLanguage})
-- Cryptographic Entropy Seed: ${Date.now()}_${randomSeedNumber}_pass${pass}
+- Cryptographic Entropy Seed: ${Date.now()}_${randomSeedNumber}_pass${pass}_chunk${chunk.chunkIndex}
 
 REQUIRED SUBTOPIC & REASONING TASK DIVERSITY PLAN FOR THIS BATCH:
-${slotAssignments.join('\n')}
+${chunk.slots.join('\n')}
 ${exclusionSection}`;
 
-    const { response, modelUsed } = await generateContentWithModelFallback(ai, {
-      contents: prompt,
-      config: {
-        systemInstruction,
-        temperature: pass === 1 ? 0.9 : 0.95,
-        responseMimeType: 'application/json',
-        responseSchema: {
-          type: Type.ARRAY,
-          items: {
-            type: Type.OBJECT,
-            properties: {
-              questionText: {
-                type: Type.STRING,
-                description: `Full question text written in ${langName}`,
-              },
-              questionType: {
-                type: Type.STRING,
-                description: 'Either "mcq" or "tf"',
-              },
-              options: {
-                type: Type.ARRAY,
-                items: { type: Type.STRING },
-                description: '4 distinct options for mcq, or 2 options for tf',
-              },
-              correctIndex: {
-                type: Type.INTEGER,
-                description: '0-based index of the single correct option',
-              },
-              explanation: {
-                type: Type.STRING,
-                description: `Step-by-step explanation of why the correct option is right, in ${langName}`,
-              },
-              hint: {
-                type: Type.STRING,
-                description: `Short helpful hint without giving away the answer, in ${langName}`,
-              },
-              topic: {
-                type: Type.STRING,
-                description: 'Specific chapter or subtopic name',
-              },
-              difficulty: {
-                type: Type.STRING,
-                description: 'easy, medium, or hard',
-              },
-              conceptKey: {
-                type: Type.STRING,
-                description:
-                  'Specific snake_case identifier of the exact academic concept & scenario tested',
-              },
-            },
-            required: [
-              'questionText',
-              'questionType',
-              'options',
-              'correctIndex',
-              'explanation',
-              'topic',
-              'difficulty',
-              'conceptKey',
-            ],
+        return generateContentWithModelFallback(ai, {
+          contents: chunkPrompt,
+          config: {
+            systemInstruction,
+            temperature: pass === 1 ? 0.9 : 0.95,
+            responseMimeType: 'application/json',
+            responseSchema: questionItemSchema,
           },
-        },
-      },
-    });
+        });
+      })
+    );
 
-    resolvedModelName = modelUsed;
-    const parsed = parseGeminiJsonSafe(response?.text);
-    const candidateArray = Array.isArray(parsed)
-      ? parsed
-      : Array.isArray(parsed?.questions)
-      ? parsed.questions
-      : Array.isArray(parsed?.items)
-      ? parsed.items
-      : [];
+    const candidateArray: any[] = [];
+    let lastChunkError: any = null;
+
+    for (const resItem of chunkResults) {
+      if (resItem.status === 'fulfilled') {
+        resolvedModelName = resItem.value.modelUsed;
+        const parsed = parseGeminiJsonSafe(resItem.value.response?.text);
+        const items = Array.isArray(parsed)
+          ? parsed
+          : Array.isArray(parsed?.questions)
+          ? parsed.questions
+          : Array.isArray(parsed?.items)
+          ? parsed.items
+          : [];
+        candidateArray.push(...items);
+      } else {
+        lastChunkError = resItem.reason;
+      }
+    }
+
+    if (candidateArray.length === 0 && lastChunkError && acceptedQuestions.length === 0) {
+      throw lastChunkError;
+    }
 
     for (const rawItem of candidateArray) {
       if (acceptedQuestions.length >= questionCount) break;
