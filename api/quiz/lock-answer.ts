@@ -1,6 +1,6 @@
-import app from '../../server';
+import handler from '../index.js';
 
-export default function handler(req: any, res: any) {
+export default async function (req: any, res: any) {
   req.url = '/api/quiz/lock-answer';
-  return app(req, res);
+  return handler(req, res);
 }

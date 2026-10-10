@@ -78,9 +78,18 @@ export async function safeFetchJson<T = any>(
   }
 
   if (!response.ok) {
+    const nestedErrorMsg =
+      parsed?.error &&
+      typeof parsed.error === 'object' &&
+      typeof parsed.error.message === 'string'
+        ? parsed.error.message.trim()
+        : '';
+
     const serverErrorMsg =
       typeof parsed?.error === 'string' && parsed.error.trim().length > 0
         ? parsed.error.trim()
+        : nestedErrorMsg.length > 0
+        ? nestedErrorMsg
         : typeof parsed?.message === 'string' && parsed.message.trim().length > 0
         ? parsed.message.trim()
         : `Request failed with HTTP status ${response.status}.`;
