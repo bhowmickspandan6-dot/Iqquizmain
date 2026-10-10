@@ -1,3 +1,4 @@
+import 'dotenv/config';
 import crypto from 'crypto';
 import { GoogleGenAI, ThinkingLevel, Type } from '@google/genai';
 
@@ -33,22 +34,60 @@ function logServerError(context: string, err: any, extra?: Record<string, any>) 
   console.error(`[IQ Quiz Server Error] ${context}:`, JSON.stringify(safeDetails));
 }
 
+function sanitizeEnvApiKey(raw: unknown): string {
+  if (typeof raw !== 'string') return '';
+  let cleaned = raw.trim();
+  // Handle accidental paste of "GEMINI_API_KEY=AIza..." into the environment variable value field
+  if (/^[A-Za-z0-9_]+\s*=/.test(cleaned)) {
+    cleaned = cleaned.replace(/^[A-Za-z0-9_]+\s*=\s*/, '').trim();
+  }
+  // Strip surrounding quotes or backticks if present
+  cleaned = cleaned.replace(/^["'`]+|["'`]+$/g, '').trim();
+  if (
+    !cleaned ||
+    cleaned === 'MY_GEMINI_API_KEY' ||
+    cleaned === 'YOUR_GEMINI_API_KEY' ||
+    cleaned === 'undefined' ||
+    cleaned === 'null' ||
+    cleaned.length <= 10
+  ) {
+    return '';
+  }
+  return cleaned;
+}
+
 function getServerApiKey(): string {
-  const candidates = [
-    process.env.GEMINI_API_KEY,
+  // 1. Primary server-side environment variable: exact match process.env.GEMINI_API_KEY
+  const primaryKey = sanitizeEnvApiKey(process.env.GEMINI_API_KEY);
+  if (primaryKey) {
+    return primaryKey;
+  }
+
+  // 2. Server-only fallbacks (never client-prefixed VITE_ variables)
+  const serverFallbacks = [
     process.env.GOOGLE_GEMINI_API_KEY,
     process.env.GOOGLE_GENAI_API_KEY,
     process.env.GOOGLE_API_KEY,
-    process.env.VITE_GEMINI_API_KEY,
   ];
-  for (const raw of candidates) {
-    if (typeof raw === 'string') {
-      const cleaned = raw.replace(/^["']|["']$/g, '').trim();
-      if (cleaned && cleaned !== 'MY_GEMINI_API_KEY' && cleaned.length > 10) {
-        return cleaned;
+  for (const raw of serverFallbacks) {
+    const cleaned = sanitizeEnvApiKey(raw);
+    if (cleaned) {
+      return cleaned;
+    }
+  }
+
+  // 3. Tolerate accidental whitespace or case differences in the GEMINI_API_KEY key name in hosting dashboards
+  if (process.env && typeof process.env === 'object') {
+    for (const [envKey, envVal] of Object.entries(process.env)) {
+      if (envKey.trim().toUpperCase() === 'GEMINI_API_KEY') {
+        const cleaned = sanitizeEnvApiKey(envVal);
+        if (cleaned) {
+          return cleaned;
+        }
       }
     }
   }
+
   return '';
 }
 
@@ -1373,10 +1412,12 @@ export default async function handler(req: any, res: any) {
     if (method === 'GET' && routePath === '/api/ai/status') {
       const hasKey = Boolean(getServerApiKey());
       sendJson(res, 200, {
+        status: hasKey ? 'ready' : 'missing_api_key',
+        apiKeyConfigured: hasKey,
+        requiredEnvVar: 'GEMINI_API_KEY',
         model: ACTIVE_GEMINI_MODEL,
         supportedModels: SUPPORTED_GEMINI_MODELS,
         freeTierEligible: true,
-        apiKeyConfigured: hasKey,
       });
       return;
     }
@@ -1549,6 +1590,13 @@ export default async function handler(req: any, res: any) {
           quizLanguage: validQuizLang,
         });
         const msg = String(aiErr?.message || aiErr || '').toLowerCase();
+        if (msg.includes('api_key_invalid') || msg.includes('api key not valid') || msg.includes('invalid api key')) {
+          sendJson(res, 503, {
+            error:
+              'The configured GEMINI_API_KEY on the server was rejected by Google Gemini API. Please verify your GEMINI_API_KEY in Vercel Project Settings → Environment Variables and redeploy.',
+          });
+          return;
+        }
         if (msg.includes('429') || msg.includes('resource_exhausted') || msg.includes('quota')) {
           sendJson(res, 429, {
             error:
@@ -1731,9 +1779,13 @@ export default async function handler(req: any, res: any) {
 
       const ai = getAiClient();
       if (!ai) {
+        logServerError(
+          'Missing GEMINI_API_KEY in /api/quiz/retake',
+          new Error('GEMINI_API_KEY is not configured in server environment variables.')
+        );
         sendJson(res, 503, {
           error:
-            'Gemini AI API key is not configured on the server. Please add GEMINI_API_KEY in your Environment Variables.',
+            'Gemini AI API key is not configured on the server. Please add GEMINI_API_KEY in your Environment Variables and redeploy.',
         });
         return;
       }
@@ -2014,9 +2066,13 @@ export default async function handler(req: any, res: any) {
 
       const ai = getAiClient();
       if (!ai) {
+        logServerError(
+          'Missing GEMINI_API_KEY in /api/notes/process',
+          new Error('GEMINI_API_KEY is not configured in server environment variables.')
+        );
         sendJson(res, 503, {
           error:
-            'Gemini AI API key is not configured on the server. Please add GEMINI_API_KEY in your Environment Variables.',
+            'Gemini AI API key is not configured on the server. Please add GEMINI_API_KEY in your Environment Variables and redeploy.',
         });
         return;
       }
