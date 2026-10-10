@@ -64,6 +64,10 @@ import {
   deleteStudyNoteFromFirestore,
   User,
 } from './firebase';
+import {
+  safeFetchJson,
+  validateQuizAttemptPayload,
+} from './utils/apiClient';
 
 const STORAGE_KEYS = {
   PREFS: 'eduquiz_prefs_v1',
@@ -230,20 +234,26 @@ export default function App() {
     const savedActiveId = localStorage.getItem(STORAGE_KEYS.ACTIVE_ATTEMPT_ID);
     if (!savedActiveId) return;
 
-    fetch(`/api/quiz/attempt/${savedActiveId}`)
-      .then((r) => (r.ok ? r.json() : null))
-      .then((recovered: QuizAttemptState | null) => {
-        if (recovered) {
-          setActiveAttempt(recovered);
-          setAttemptsHistory((prev) => {
-            const exists = prev.some((a) => a.attemptId === recovered.attemptId);
-            return exists
-              ? prev.map((a) => (a.attemptId === recovered.attemptId ? recovered : a))
-              : [recovered, ...prev];
-          });
-        }
+    // Immediately restore from local history if present (works across Vercel serverless cold starts)
+    const localMatch = attemptsHistory.find((a) => a.attemptId === savedActiveId);
+    if (localMatch) {
+      setActiveAttempt(localMatch);
+    }
+
+    safeFetchJson<QuizAttemptState>(`/api/quiz/attempt/${savedActiveId}`)
+      .then((recovered) => {
+        const validated = validateQuizAttemptPayload(recovered);
+        setActiveAttempt(validated);
+        setAttemptsHistory((prev) => {
+          const exists = prev.some((a) => a.attemptId === validated.attemptId);
+          return exists
+            ? prev.map((a) => (a.attemptId === validated.attemptId ? validated : a))
+            : [validated, ...prev];
+        });
       })
-      .catch(() => {});
+      .catch(() => {
+        // Keep localMatch if serverless instance restarted
+      });
   }, []);
 
   // Reset topic to "All Verified Chapters" when class or subject changes if the topic isn't in that curriculum
@@ -351,22 +361,20 @@ export default function App() {
           attemptsHistory.find((a) => a.attemptId === pendingLaunch.originalAttemptId) ||
           (activeAttempt?.attemptId === pendingLaunch.originalAttemptId ? activeAttempt : null);
 
-        const res = await fetch('/api/quiz/retake', {
+        const rawData = await safeFetchJson('/api/quiz/retake', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({
             originalAttemptId: pendingLaunch.originalAttemptId,
             originalConfig: origAttempt?.config,
             originalQuestions: origAttempt?.questions,
+            serverStateToken: origAttempt?.serverStateToken,
             quizLanguage: confirmedQuizLanguage,
             userId: effectiveUserId,
           }),
         });
-        const data = await res.json();
-        if (!res.ok) {
-          throw new Error(data.error || t(interfaceLanguage, 'genErrorTitle'));
-        }
-        upsertAttemptInHistory(data);
+        const validated = validateQuizAttemptPayload(rawData);
+        upsertAttemptInHistory(validated);
         setPendingLaunch(null);
         setActiveNav('take_quiz');
         return;
@@ -378,7 +386,7 @@ export default function App() {
         pendingLaunch.noteMcqs.length > 0 &&
         confirmedQuizLanguage === quizLanguage
       ) {
-        const res = await fetch('/api/quiz/from-notes', {
+        const rawData = await safeFetchJson('/api/quiz/from-notes', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({
@@ -390,18 +398,15 @@ export default function App() {
             userId: effectiveUserId,
           }),
         });
-        const data = await res.json();
-        if (!res.ok) {
-          throw new Error(data.error || t(interfaceLanguage, 'genErrorTitle'));
-        }
-        upsertAttemptInHistory(data);
+        const validated = validateQuizAttemptPayload(rawData);
+        upsertAttemptInHistory(validated);
         setPendingLaunch(null);
         setActiveNav('take_quiz');
         return;
       }
 
       // Standard / Random / Cross-language Note Quiz Generation in confirmedQuizLanguage
-      const res = await fetch('/api/quiz/generate', {
+      const rawData = await safeFetchJson('/api/quiz/generate', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -418,11 +423,8 @@ export default function App() {
           clientExcludedFingerprints: seenFingerprints,
         }),
       });
-      const data = await res.json();
-      if (!res.ok) {
-        throw new Error(data.error || t(interfaceLanguage, 'genErrorTitle'));
-      }
-      upsertAttemptInHistory(data);
+      const validated = validateQuizAttemptPayload(rawData);
+      upsertAttemptInHistory(validated);
       setPendingLaunch(null);
       setActiveNav('take_quiz');
     } catch (err: any) {
@@ -440,60 +442,63 @@ export default function App() {
     elapsedSeconds: number
   ) => {
     if (!activeAttempt) return;
-    const res = await fetch('/api/quiz/lock-answer', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        attemptId: activeAttempt.attemptId,
-        questionId,
-        selectedIndex,
-        timeTakenSeconds: elapsedSeconds,
-      }),
-    });
-    const data = await res.json();
-    if (!res.ok) {
-      if (data.attempt) {
-        upsertAttemptInHistory(data.attempt);
+    const data = await safeFetchJson<{ locked?: boolean; attempt?: QuizAttemptState }>(
+      '/api/quiz/lock-answer',
+      {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          attemptId: activeAttempt.attemptId,
+          questionId,
+          selectedIndex,
+          timeTakenSeconds: elapsedSeconds,
+          serverStateToken: activeAttempt.serverStateToken,
+          lockedAnswersSnapshot: activeAttempt.lockedAnswers,
+        }),
       }
-      throw new Error(data.error || 'Answer could not be locked.');
-    }
-    if (data.attempt) {
-      upsertAttemptInHistory(data.attempt);
+    );
+    if (data?.attempt) {
+      upsertAttemptInHistory(validateQuizAttemptPayload(data.attempt));
     }
   };
 
   // Toggle Mark for Review (Unanswered questions only)
   const handleToggleReview = async (questionId: string) => {
     if (!activeAttempt) return;
-    const res = await fetch('/api/quiz/toggle-review', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        attemptId: activeAttempt.attemptId,
-        questionId,
-      }),
-    });
-    const data = await res.json();
-    if (data.attempt) {
-      upsertAttemptInHistory(data.attempt);
+    const data = await safeFetchJson<{ attempt?: QuizAttemptState }>(
+      '/api/quiz/toggle-review',
+      {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          attemptId: activeAttempt.attemptId,
+          questionId,
+          serverStateToken: activeAttempt.serverStateToken,
+          lockedAnswersSnapshot: activeAttempt.lockedAnswers,
+          markedForReviewSnapshot: activeAttempt.markedForReview,
+        }),
+      }
+    );
+    if (data?.attempt) {
+      upsertAttemptInHistory(validateQuizAttemptPayload(data.attempt));
     }
   };
 
   // Submit Final Quiz Attempt
   const handleSubmitQuiz = async (elapsedSeconds: number) => {
     if (!activeAttempt) return;
-    const res = await fetch('/api/quiz/submit', {
+    const data = await safeFetchJson<QuizAttemptState>('/api/quiz/submit', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
         attemptId: activeAttempt.attemptId,
         timeTakenSeconds: elapsedSeconds,
+        serverStateToken: activeAttempt.serverStateToken,
+        lockedAnswersSnapshot: activeAttempt.lockedAnswers,
       }),
     });
-    const data = await res.json();
-    if (res.ok && data.attemptId) {
-      upsertAttemptInHistory(data);
-    }
+    const validated = validateQuizAttemptPayload(data);
+    upsertAttemptInHistory(validated);
   };
 
   // Retake Quiz — Opens the Mandatory Language Selection Modal FIRST, preserving original attempt

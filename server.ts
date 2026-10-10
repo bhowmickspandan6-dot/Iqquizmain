@@ -3,22 +3,40 @@ import express from 'express';
 import path from 'path';
 import crypto from 'crypto';
 import { fileURLToPath } from 'url';
-import { createServer as createViteServer } from 'vite';
 import { GoogleGenAI, Type } from '@google/genai';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
 // Free-tier eligible models allowlist (never silently switch to a paid model)
-const FREE_TIER_MODELS = ['gemini-3.8-flash', 'gemini-3.1-flash-lite', 'gemini-flash-latest'];
-const configuredModel = process.env.GEMINI_MODEL || 'gemini-3.8-flash';
+const FREE_TIER_MODELS = [
+  'gemini-3.8-flash',
+  'gemini-3-flash-preview',
+  'gemini-2.5-flash',
+  'gemini-flash-latest',
+  'gemini-3.1-flash-lite',
+];
+const configuredModel = (process.env.GEMINI_MODEL || 'gemini-3.8-flash').trim();
 const ACTIVE_GEMINI_MODEL = FREE_TIER_MODELS.includes(configuredModel)
   ? configuredModel
   : 'gemini-3.8-flash';
 
+function getServerApiKey(): string {
+  const raw =
+    process.env.GEMINI_API_KEY ||
+    process.env.GOOGLE_GENAI_API_KEY ||
+    process.env.GOOGLE_API_KEY ||
+    '';
+  const cleaned = raw.replace(/^["']|["']$/g, '').trim();
+  if (!cleaned || cleaned === 'MY_GEMINI_API_KEY') {
+    return '';
+  }
+  return cleaned;
+}
+
 function getAiClient(): GoogleGenAI | null {
-  const apiKey = process.env.GEMINI_API_KEY;
-  if (!apiKey || apiKey === 'MY_GEMINI_API_KEY' || apiKey.trim() === '') {
+  const apiKey = getServerApiKey();
+  if (!apiKey) {
     return null;
   }
   return new GoogleGenAI({
@@ -29,6 +47,83 @@ function getAiClient(): GoogleGenAI | null {
       },
     },
   });
+}
+
+// Automatically tries the active free-tier Gemini Flash models in order if an endpoint rejects a model alias
+async function generateContentWithModelFallback(
+  ai: GoogleGenAI,
+  params: {
+    contents: any;
+    config?: any;
+  }
+): Promise<{ response: any; modelUsed: string }> {
+  const candidateModels = Array.from(
+    new Set([
+      ACTIVE_GEMINI_MODEL,
+      'gemini-3.8-flash',
+      'gemini-3-flash-preview',
+      'gemini-2.5-flash',
+      'gemini-flash-latest',
+      'gemini-3.1-flash-lite',
+    ])
+  );
+  let lastError: any = null;
+
+  for (const modelName of candidateModels) {
+    try {
+      const response = await ai.models.generateContent({
+        model: modelName,
+        contents: params.contents,
+        config: params.config,
+      });
+      return { response, modelUsed: modelName };
+    } catch (err: any) {
+      lastError = err;
+      const msg = String(err?.message || err || '').toLowerCase();
+      // If rate limit / quota exhausted (429), do not hammer other aliases unnecessarily
+      if (msg.includes('429') || msg.includes('resource_exhausted') || msg.includes('quota')) {
+        break;
+      }
+    }
+  }
+  throw lastError || new Error('Gemini API request failed.');
+}
+
+// Safely parses structured JSON from Gemini responses, stripping markdown code fences or surrounding prose if present
+function parseGeminiJsonSafe(rawText: string | undefined): any {
+  if (!rawText || typeof rawText !== 'string') return null;
+  let cleaned = rawText
+    .trim()
+    .replace(/^```(?:json)?\s*/i, '')
+    .replace(/\s*```$/i, '')
+    .trim();
+
+  if (!cleaned) return null;
+
+  try {
+    return JSON.parse(cleaned);
+  } catch {
+    // Attempt to extract the outermost JSON array or object
+    const firstBracket = cleaned.indexOf('[');
+    const lastBracket = cleaned.lastIndexOf(']');
+    if (firstBracket !== -1 && lastBracket > firstBracket) {
+      try {
+        return JSON.parse(cleaned.slice(firstBracket, lastBracket + 1));
+      } catch {
+        // continue
+      }
+    }
+    const firstBrace = cleaned.indexOf('{');
+    const lastBrace = cleaned.lastIndexOf('}');
+    if (firstBrace !== -1 && lastBrace > firstBrace) {
+      try {
+        return JSON.parse(cleaned.slice(firstBrace, lastBrace + 1));
+      } catch {
+        // continue
+      }
+    }
+    return null;
+  }
 }
 
 // In-memory rate limiting per user/IP (protects free-tier quota)
@@ -137,6 +232,91 @@ interface ServerQuizAttempt {
 
 const serverAttempts = new Map<string, ServerQuizAttempt>();
 
+// Stateless AES-256-GCM encryption for ServerQuizAttempt so Vercel Serverless Functions
+// preserve authoritative quiz state & hidden Test Mode answers across cold starts.
+function getTokenSecretKey(): Buffer {
+  const secretSeed = getServerApiKey() || process.env.APP_URL || 'iq-quiz-stateless-token-key-v1';
+  return crypto.createHash('sha256').update(secretSeed).digest();
+}
+
+function encodeServerStateToken(attempt: ServerQuizAttempt): string {
+  try {
+    const key = getTokenSecretKey();
+    const iv = crypto.randomBytes(12);
+    const cipher = crypto.createCipheriv('aes-256-gcm', key, iv);
+    const plaintext = Buffer.from(JSON.stringify(attempt), 'utf8');
+    const encrypted = Buffer.concat([cipher.update(plaintext), cipher.final()]);
+    const authTag = cipher.getAuthTag();
+    return Buffer.concat([iv, authTag, encrypted]).toString('base64url');
+  } catch {
+    return '';
+  }
+}
+
+function decodeServerStateToken(token?: string): ServerQuizAttempt | null {
+  if (!token || typeof token !== 'string') return null;
+  try {
+    const raw = Buffer.from(token, 'base64url');
+    if (raw.length < 29) return null;
+    const iv = raw.subarray(0, 12);
+    const authTag = raw.subarray(12, 28);
+    const encrypted = raw.subarray(28);
+    const key = getTokenSecretKey();
+    const decipher = crypto.createDecipheriv('aes-256-gcm', key, iv);
+    decipher.setAuthTag(authTag);
+    const decrypted = Buffer.concat([decipher.update(encrypted), decipher.final()]).toString('utf8');
+    const parsed = JSON.parse(decrypted);
+    if (parsed && typeof parsed.attemptId === 'string' && Array.isArray(parsed.questions)) {
+      return parsed as ServerQuizAttempt;
+    }
+    return null;
+  } catch {
+    return null;
+  }
+}
+
+function resolveServerAttempt(
+  attemptId: string,
+  serverStateToken?: string,
+  lockedAnswersSnapshot?: Record<string, any>,
+  markedForReviewSnapshot?: string[]
+): ServerQuizAttempt | null {
+  let attempt = serverAttempts.get(attemptId) || null;
+  if (!attempt && serverStateToken) {
+    const decoded = decodeServerStateToken(serverStateToken);
+    if (decoded && decoded.attemptId === attemptId) {
+      attempt = decoded;
+      serverAttempts.set(attemptId, attempt);
+    }
+  }
+  if (!attempt) return null;
+
+  // Monotonically preserve any previously locked answers (never unlock an already locked answer)
+  if (lockedAnswersSnapshot && typeof lockedAnswersSnapshot === 'object') {
+    for (const [qId, snapLock] of Object.entries(lockedAnswersSnapshot)) {
+      if (!attempt.lockedAnswers[qId] && snapLock && typeof snapLock.selectedIndex === 'number') {
+        const q = attempt.questions.find((item) => item.id === qId);
+        if (q) {
+          attempt.lockedAnswers[qId] = {
+            questionId: qId,
+            selectedIndex: snapLock.selectedIndex,
+            lockedAt: String(snapLock.lockedAt || new Date().toISOString()),
+            isCorrect: snapLock.selectedIndex === q.correctIndex,
+          };
+        }
+      }
+    }
+  }
+
+  if (Array.isArray(markedForReviewSnapshot) && attempt.markedForReview.length === 0) {
+    attempt.markedForReview = markedForReviewSnapshot.filter(
+      (qId) => typeof qId === 'string' && !attempt!.lockedAnswers[qId]
+    );
+  }
+
+  return attempt;
+}
+
 // Sanitize attempt for client delivery:
 // NEVER expose correctIndex or explanation in Test Mode before completion,
 // or in Practice Mode before that specific question is locked!
@@ -201,6 +381,7 @@ function sanitizeAttemptForClient(attempt: ServerQuizAttempt) {
     completedAt: attempt.completedAt,
     timeTakenSeconds: attempt.timeTakenSeconds,
     scoreSummary: isCompleted ? attempt.scoreSummary : undefined,
+    serverStateToken: encodeServerStateToken(attempt),
     generationInfo: attempt.generationInfo,
   };
 }
@@ -1069,86 +1250,95 @@ function generateVerifiedCurriculumQuestions(
   return results;
 }
 
-async function startServer() {
-  const app = express();
-  const PORT = 3000;
+export const app = express();
+const PORT = Number(process.env.PORT) || 3000;
 
-  app.use(express.json({ limit: '15mb' }));
+app.use(express.json({ limit: '15mb' }));
 
-  // 1. Health & AI Status Endpoint
-  app.get('/api/ai/status', (_req, res) => {
-    const hasKey = Boolean(
-      process.env.GEMINI_API_KEY &&
-        process.env.GEMINI_API_KEY !== 'MY_GEMINI_API_KEY' &&
-        process.env.GEMINI_API_KEY.trim() !== ''
-    );
-    res.json({
-      model: ACTIVE_GEMINI_MODEL,
-      freeTierEligible: true,
-      apiKeyConfigured: hasKey,
-    });
+// Normalize URL paths when invoked behind serverless rewrites
+app.use((req, _res, next) => {
+  if (
+    !req.url.startsWith('/api/') &&
+    (req.url.startsWith('/quiz/') || req.url.startsWith('/notes/') || req.url.startsWith('/ai/'))
+  ) {
+    req.url = `/api${req.url}`;
+  }
+  next();
+});
+
+// 1. Health & AI Status Endpoint
+app.get('/api/ai/status', (_req, res) => {
+  const hasKey = Boolean(getServerApiKey());
+  res.json({
+    model: ACTIVE_GEMINI_MODEL,
+    freeTierEligible: true,
+    apiKeyConfigured: hasKey,
   });
+});
 
-  // 2. Generate Unique Quiz Endpoint
-  app.post('/api/quiz/generate', async (req, res) => {
-    try {
-      const {
-        classLevel = 8,
-        subject = 'mathematics',
-        quizLanguage = 'en',
-        topic = 'All Verified Chapters',
-        difficulty = 'mixed',
-        questionCount = 5,
-        questionType = 'mcq',
-        durationMinutes = 10,
-        mode = 'practice',
-        userId = 'local_student',
-        clientExcludedFingerprints = [],
-      } = req.body || {};
+// 2. Generate Unique Quiz Endpoint
+app.post('/api/quiz/generate', async (req, res) => {
+  try {
+    const {
+      classLevel = 8,
+      subject = 'mathematics',
+      quizLanguage = 'en',
+      topic = 'All Verified Chapters',
+      difficulty = 'mixed',
+      questionCount = 5,
+      questionType = 'mcq',
+      durationMinutes = 10,
+      mode = 'practice',
+      userId = 'local_student',
+      clientExcludedFingerprints = [],
+    } = req.body || {};
 
-      const rateKey = `${userId || req.ip || 'anon'}_quiz`;
-      const limitCheck = checkRateLimit(rateKey);
-      if (!limitCheck.allowed) {
-        return res.status(429).json({
-          error: `Rate limit reached. Please wait ${limitCheck.retryAfterSeconds} seconds before generating another quiz.`,
-        });
-      }
+    const rateKey = `${userId || req.ip || 'anon'}_quiz`;
+    const limitCheck = checkRateLimit(rateKey);
+    if (!limitCheck.allowed) {
+      return res.status(429).json({
+        error: `Rate limit reached. Please wait ${limitCheck.retryAfterSeconds} seconds before generating another quiz.`,
+      });
+    }
 
-      const validCount = [5, 10, 15, 20, 30].includes(Number(questionCount))
-        ? Number(questionCount)
-        : 5;
-      const validClass = [5, 6, 7, 8, 9, 10].includes(Number(classLevel))
-        ? Number(classLevel)
-        : 8;
-      const validQuizLang: 'en' | 'bn' | 'hi' =
-        quizLanguage === 'bn' || quizLanguage === 'hi' ? quizLanguage : 'en';
+    const validCount = [5, 10, 15, 20, 30].includes(Number(questionCount))
+      ? Number(questionCount)
+      : 5;
+    const validClass = [5, 6, 7, 8, 9, 10].includes(Number(classLevel))
+      ? Number(classLevel)
+      : 8;
+    const validQuizLang: 'en' | 'bn' | 'hi' =
+      quizLanguage === 'bn' || quizLanguage === 'hi' ? quizLanguage : 'en';
 
-      const userHist = getUserHistory(userId);
+    const userHist = getUserHistory(userId);
+    if (Array.isArray(clientExcludedFingerprints)) {
       for (const fp of clientExcludedFingerprints) {
         if (typeof fp === 'string') userHist.fingerprints.add(fp);
       }
+    }
 
-      const excludedFingerprintsSnapshot = new Set<string>(userHist.fingerprints);
-      const excludedConceptsSnapshot = new Set<string>(userHist.concepts);
-      const excludedHistoryCount = excludedFingerprintsSnapshot.size;
+    const excludedFingerprintsSnapshot = new Set<string>(userHist.fingerprints);
+    const excludedConceptsSnapshot = new Set<string>(userHist.concepts);
+    const excludedHistoryCount = excludedFingerprintsSnapshot.size;
 
-      const validatedQuestions: ServerQuestion[] = [];
-      let usedGemini = false;
-      let notice: string | undefined;
+    const validatedQuestions: ServerQuestion[] = [];
+    let usedGemini = false;
+    let resolvedModelName = ACTIVE_GEMINI_MODEL;
+    let notice: string | undefined;
 
-      const ai = getAiClient();
-      if (ai) {
-        try {
-          const langName =
-            validQuizLang === 'bn'
-              ? 'Bengali (বাংলা)'
-              : validQuizLang === 'hi'
-              ? 'Hindi (हिन्दी)'
-              : 'English';
+    const ai = getAiClient();
+    if (ai) {
+      try {
+        const langName =
+          validQuizLang === 'bn'
+            ? 'Bengali (বাংলা)'
+            : validQuizLang === 'hi'
+            ? 'Hindi (हिन्दी)'
+            : 'English';
 
-          const recentConcepts = Array.from(excludedConceptsSnapshot).slice(-35).join(', ');
+        const recentConcepts = Array.from(excludedConceptsSnapshot).slice(-35).join(', ');
 
-          const systemInstruction = `You are a senior academic curriculum examiner for West Bengal Board (WBBPE/WBBSE) Classes 5 to 10.
+        const systemInstruction = `You are a senior academic curriculum examiner for West Bengal Board (WBBPE/WBBSE) Classes 5 to 10.
 CRITICAL RULES:
 1. Subject Independence: The academic subject being tested is "${subject}". The presentation language (Quiz Language) is "${langName}".
 2. Even if the subject is Bangla, English, or Hindi, you MUST write the question stem, instructions, and explanation in "${langName}" while testing the academic content of "${subject}" for Class ${validClass}.
@@ -1158,7 +1348,7 @@ CRITICAL RULES:
 6. For General Knowledge (gk), include verifiable dates or authoritative sources in the question or explanation.
 7. For questionType "${questionType}": if "mcq", provide exactly 4 distinct options and correctIndex (0-3). If "tf", provide 2 options (True/False in ${langName}) and correctIndex (0 or 1). If "mixed", include both "mcq" and "tf" questions.`;
 
-          const prompt = `Generate exactly ${validCount} unique quiz questions for:
+        const prompt = `Generate exactly ${validCount} unique quiz questions for:
 - Class: Class ${validClass}
 - Subject: ${subject}
 - Topic/Chapter: ${topic}
@@ -1167,303 +1357,338 @@ CRITICAL RULES:
 - Quiz Presentation Language: ${langName} (code: ${validQuizLang})
 - Unique Generation Seed: ${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
 
-          const response = await ai.models.generateContent({
-            model: ACTIVE_GEMINI_MODEL,
-            contents: prompt,
-            config: {
-              systemInstruction,
-              temperature: 0.85,
-              responseMimeType: 'application/json',
-              responseSchema: {
-                type: Type.ARRAY,
-                items: {
-                  type: Type.OBJECT,
-                  properties: {
-                    questionText: {
-                      type: Type.STRING,
-                      description: `Full question text written in ${langName}`,
-                    },
-                    questionType: {
-                      type: Type.STRING,
-                      description: 'Either "mcq" or "tf"',
-                    },
-                    options: {
-                      type: Type.ARRAY,
-                      items: { type: Type.STRING },
-                      description: '4 distinct options for mcq, or 2 options for tf',
-                    },
-                    correctIndex: {
-                      type: Type.INTEGER,
-                      description: '0-based index of the single correct option',
-                    },
-                    explanation: {
-                      type: Type.STRING,
-                      description: `Step-by-step explanation of why the correct option is right, in ${langName}`,
-                    },
-                    hint: {
-                      type: Type.STRING,
-                      description: `Short helpful hint without giving away the answer, in ${langName}`,
-                    },
-                    topic: {
-                      type: Type.STRING,
-                      description: 'Specific chapter or subtopic name',
-                    },
-                    difficulty: {
-                      type: Type.STRING,
-                      description: 'easy, medium, or hard',
-                    },
-                    conceptKey: {
-                      type: Type.STRING,
-                      description:
-                        'Language-agnostic snake_case identifier of the core academic concept tested (e.g. ohms_law_resistance_calc)',
-                    },
+        const { response, modelUsed } = await generateContentWithModelFallback(ai, {
+          contents: prompt,
+          config: {
+            systemInstruction,
+            temperature: 0.85,
+            responseMimeType: 'application/json',
+            responseSchema: {
+              type: Type.ARRAY,
+              items: {
+                type: Type.OBJECT,
+                properties: {
+                  questionText: {
+                    type: Type.STRING,
+                    description: `Full question text written in ${langName}`,
                   },
-                  required: [
-                    'questionText',
-                    'questionType',
-                    'options',
-                    'correctIndex',
-                    'explanation',
-                    'topic',
-                    'difficulty',
-                    'conceptKey',
-                  ],
+                  questionType: {
+                    type: Type.STRING,
+                    description: 'Either "mcq" or "tf"',
+                  },
+                  options: {
+                    type: Type.ARRAY,
+                    items: { type: Type.STRING },
+                    description: '4 distinct options for mcq, or 2 options for tf',
+                  },
+                  correctIndex: {
+                    type: Type.INTEGER,
+                    description: '0-based index of the single correct option',
+                  },
+                  explanation: {
+                    type: Type.STRING,
+                    description: `Step-by-step explanation of why the correct option is right, in ${langName}`,
+                  },
+                  hint: {
+                    type: Type.STRING,
+                    description: `Short helpful hint without giving away the answer, in ${langName}`,
+                  },
+                  topic: {
+                    type: Type.STRING,
+                    description: 'Specific chapter or subtopic name',
+                  },
+                  difficulty: {
+                    type: Type.STRING,
+                    description: 'easy, medium, or hard',
+                  },
+                  conceptKey: {
+                    type: Type.STRING,
+                    description:
+                      'Language-agnostic snake_case identifier of the core academic concept tested (e.g. ohms_law_resistance_calc)',
+                  },
                 },
+                required: [
+                  'questionText',
+                  'questionType',
+                  'options',
+                  'correctIndex',
+                  'explanation',
+                  'topic',
+                  'difficulty',
+                  'conceptKey',
+                ],
               },
             },
-          });
+          },
+        });
 
-          const rawText = response.text?.trim() || '[]';
-          const parsed = JSON.parse(rawText);
-          if (Array.isArray(parsed)) {
-            for (const item of parsed) {
-              if (validatedQuestions.length >= validCount) break;
-              const v = validateAndNormalizeQuestion(
-                item,
-                {
-                  classLevel: validClass,
-                  subject,
-                  quizLanguage: validQuizLang,
-                  topic,
-                  difficulty,
-                },
-                validatedQuestions.length
-              );
-              if (
-                v &&
-                !excludedFingerprintsSnapshot.has(v.fingerprint) &&
-                !excludedConceptsSnapshot.has(v.conceptKey)
-              ) {
-                excludedFingerprintsSnapshot.add(v.fingerprint);
-                excludedConceptsSnapshot.add(v.conceptKey);
-                validatedQuestions.push(v);
-              }
-            }
-            if (validatedQuestions.length > 0) {
-              usedGemini = true;
+        resolvedModelName = modelUsed;
+        const parsed = parseGeminiJsonSafe(response?.text);
+        const candidateArray = Array.isArray(parsed)
+          ? parsed
+          : Array.isArray(parsed?.questions)
+          ? parsed.questions
+          : Array.isArray(parsed?.items)
+          ? parsed.items
+          : [];
+
+        if (candidateArray.length > 0) {
+          for (const item of candidateArray) {
+            if (validatedQuestions.length >= validCount) break;
+            const v = validateAndNormalizeQuestion(
+              item,
+              {
+                classLevel: validClass,
+                subject,
+                quizLanguage: validQuizLang,
+                topic,
+                difficulty,
+              },
+              validatedQuestions.length
+            );
+            if (
+              v &&
+              !excludedFingerprintsSnapshot.has(v.fingerprint) &&
+              !excludedConceptsSnapshot.has(v.conceptKey)
+            ) {
+              excludedFingerprintsSnapshot.add(v.fingerprint);
+              excludedConceptsSnapshot.add(v.conceptKey);
+              validatedQuestions.push(v);
             }
           }
-        } catch (aiErr: any) {
-          console.error('Gemini quiz generation fallback triggered:', aiErr?.message || aiErr);
-          notice =
-            'Gemini API rate limit or quota reached; supplemented with parameterized curriculum-verified questions.';
+          if (validatedQuestions.length > 0) {
+            usedGemini = true;
+          }
         }
-      } else {
+      } catch (aiErr: any) {
+        console.error('Gemini quiz generation fallback triggered:', aiErr?.message || aiErr);
         notice =
-          'Generated using the built-in parameterized WBBSE/WBBPE curriculum engine (configure GEMINI_API_KEY in Secrets for live AI generation).';
+          'Gemini API rate limit or quota reached; supplemented with parameterized curriculum-verified questions.';
       }
+    } else {
+      notice =
+        'Generated using the built-in parameterized WBBSE/WBBPE curriculum engine (configure GEMINI_API_KEY in environment variables for live AI generation).';
+    }
 
-      // Fill any remaining slots with verified parameterized curriculum questions (guarantees requested questionCount & zero duplicates)
-      if (validatedQuestions.length < validCount) {
-        const needed = validCount - validatedQuestions.length;
-        const fallbackItems = generateVerifiedCurriculumQuestions(
-          {
-            classLevel: validClass,
-            subject,
-            quizLanguage: validQuizLang,
-            topic,
-            difficulty,
-            questionCount: needed,
-            questionType,
-          },
-          excludedFingerprintsSnapshot,
-          excludedConceptsSnapshot
-        );
-        for (const fb of fallbackItems) {
-          if (validatedQuestions.length >= validCount) break;
-          fb.id = `q_${validClass}_${subject}_${fb.fingerprint}_${validatedQuestions.length}`;
-          validatedQuestions.push(fb);
-        }
-      }
-
-      // Record fingerprints and concepts in user history
-      for (const q of validatedQuestions) {
-        userHist.fingerprints.add(q.fingerprint);
-        userHist.concepts.add(q.conceptKey);
-      }
-
-      const attemptId = `att_${Date.now()}_${crypto.randomBytes(4).toString('hex')}`;
-      const attempt: ServerQuizAttempt = {
-        attemptId,
-        userId,
-        config: {
+    // Fill any remaining slots with verified parameterized curriculum questions (guarantees requested questionCount & zero duplicates)
+    if (validatedQuestions.length < validCount) {
+      const needed = validCount - validatedQuestions.length;
+      const fallbackItems = generateVerifiedCurriculumQuestions(
+        {
           classLevel: validClass,
           subject,
           quizLanguage: validQuizLang,
           topic,
           difficulty,
-          questionCount: validatedQuestions.length,
+          questionCount: needed,
           questionType,
-          durationMinutes: Number(durationMinutes) || 0,
-          mode: mode === 'test' ? 'test' : 'practice',
         },
-        questions: validatedQuestions,
-        lockedAnswers: {},
-        markedForReview: [],
-        status: 'in_progress',
-        startedAt: new Date().toISOString(),
-        timeTakenSeconds: 0,
-        generationInfo: {
-          model: ACTIVE_GEMINI_MODEL,
-          source: usedGemini ? 'gemini-ai' : 'verified-curriculum-engine',
-          excludedHistoryCount,
-          uniqueConceptsCount: validatedQuestions.length,
-          notice,
-        },
-      };
-
-      serverAttempts.set(attemptId, attempt);
-      console.info(
-        `[IQ Quiz Server] Quiz created | attemptId=${attemptId} | model=${ACTIVE_GEMINI_MODEL} | source=${attempt.generationInfo.source} | class=${validClass} | subject=${subject} | lang=${validQuizLang}`
+        excludedFingerprintsSnapshot,
+        excludedConceptsSnapshot
       );
-      return res.json(sanitizeAttemptForClient(attempt));
-    } catch (err: any) {
-      console.error('Error in /api/quiz/generate:', err);
-      return res.status(500).json({
-        error: err?.message || 'Failed to generate quiz.',
-      });
-    }
-  });
-
-  // 3. Strict Irreversible Answer Locking Endpoint (Section 9)
-  app.post('/api/quiz/lock-answer', (req, res) => {
-    const { attemptId, questionId, selectedIndex, timeTakenSeconds } = req.body || {};
-    if (!attemptId || !questionId || typeof selectedIndex !== 'number') {
-      return res.status(400).json({ error: 'Missing attemptId, questionId, or selectedIndex.' });
+      for (const fb of fallbackItems) {
+        if (validatedQuestions.length >= validCount) break;
+        fb.id = `q_${validClass}_${subject}_${fb.fingerprint}_${validatedQuestions.length}`;
+        validatedQuestions.push(fb);
+      }
     }
 
-    const attempt = serverAttempts.get(attemptId);
-    if (!attempt) {
-      return res.status(404).json({ error: 'Quiz attempt not found on server.' });
+    // Record fingerprints and concepts in user history
+    for (const q of validatedQuestions) {
+      userHist.fingerprints.add(q.fingerprint);
+      userHist.concepts.add(q.conceptKey);
     }
 
-    if (attempt.status === 'completed') {
-      return res.status(409).json({
-        error: 'This quiz attempt has already been submitted and finalized. Answers cannot be altered.',
-        attempt: sanitizeAttemptForClient(attempt),
-      });
-    }
-
-    // CRITICAL REQUIREMENT: Once locked, an answer can NEVER be changed!
-    if (attempt.lockedAnswers[questionId]) {
-      return res.status(409).json({
-        error: 'Answer is permanently locked for this attempt and cannot be changed.',
-        lockedRecord: attempt.lockedAnswers[questionId],
-        attempt: sanitizeAttemptForClient(attempt),
-      });
-    }
-
-    const question = attempt.questions.find((q) => q.id === questionId);
-    if (!question) {
-      return res.status(404).json({ error: 'Question not found in this attempt.' });
-    }
-
-    if (selectedIndex < 0 || selectedIndex >= question.options.length) {
-      return res.status(400).json({ error: 'Invalid option index.' });
-    }
-
-    const isCorrect = selectedIndex === question.correctIndex;
-    const lockedRecord: ServerLockedAnswer = {
-      questionId,
-      selectedIndex,
-      lockedAt: new Date().toISOString(),
-      isCorrect,
+    const attemptId = `att_${Date.now()}_${crypto.randomBytes(4).toString('hex')}`;
+    const attempt: ServerQuizAttempt = {
+      attemptId,
+      userId,
+      config: {
+        classLevel: validClass,
+        subject,
+        quizLanguage: validQuizLang,
+        topic,
+        difficulty,
+        questionCount: validatedQuestions.length,
+        questionType,
+        durationMinutes: Number(durationMinutes) || 0,
+        mode: mode === 'test' ? 'test' : 'practice',
+      },
+      questions: validatedQuestions,
+      lockedAnswers: {},
+      markedForReview: [],
+      status: 'in_progress',
+      startedAt: new Date().toISOString(),
+      timeTakenSeconds: 0,
+      generationInfo: {
+        model: resolvedModelName,
+        source: usedGemini ? 'gemini-ai' : 'verified-curriculum-engine',
+        excludedHistoryCount,
+        uniqueConceptsCount: validatedQuestions.length,
+        notice,
+      },
     };
 
-    attempt.lockedAnswers[questionId] = lockedRecord;
-    // Remove from markedForReview once locked
-    attempt.markedForReview = attempt.markedForReview.filter((id) => id !== questionId);
-    if (typeof timeTakenSeconds === 'number' && timeTakenSeconds >= 0) {
-      attempt.timeTakenSeconds = Math.max(attempt.timeTakenSeconds, Math.round(timeTakenSeconds));
-    }
+    serverAttempts.set(attemptId, attempt);
+    console.info(
+      `[IQ Quiz Server] Quiz created | attemptId=${attemptId} | model=${resolvedModelName} | source=${attempt.generationInfo.source} | class=${validClass} | subject=${subject} | lang=${validQuizLang}`
+    );
+    return res.json(sanitizeAttemptForClient(attempt));
+  } catch (err: any) {
+    console.error('Error in /api/quiz/generate:', err);
+    return res.status(500).json({
+      error: err?.message || 'Failed to generate quiz.',
+    });
+  }
+});
 
-    return res.json({
-      locked: true,
+// 3. Strict Irreversible Answer Locking Endpoint (Section 9)
+app.post('/api/quiz/lock-answer', (req, res) => {
+  const {
+    attemptId,
+    questionId,
+    selectedIndex,
+    timeTakenSeconds,
+    serverStateToken,
+    lockedAnswersSnapshot,
+  } = req.body || {};
+  if (!attemptId || !questionId || typeof selectedIndex !== 'number') {
+    return res.status(400).json({ error: 'Missing attemptId, questionId, or selectedIndex.' });
+  }
+
+  const attempt = resolveServerAttempt(attemptId, serverStateToken, lockedAnswersSnapshot);
+  if (!attempt) {
+    return res.status(404).json({ error: 'Quiz attempt not found on server.' });
+  }
+
+  if (attempt.status === 'completed') {
+    return res.status(409).json({
+      error: 'This quiz attempt has already been submitted and finalized. Answers cannot be altered.',
       attempt: sanitizeAttemptForClient(attempt),
     });
+  }
+
+  // CRITICAL REQUIREMENT: Once locked, an answer can NEVER be changed!
+  if (attempt.lockedAnswers[questionId]) {
+    return res.status(409).json({
+      error: 'Answer is permanently locked for this attempt and cannot be changed.',
+      lockedRecord: attempt.lockedAnswers[questionId],
+      attempt: sanitizeAttemptForClient(attempt),
+    });
+  }
+
+  const question = attempt.questions.find((q) => q.id === questionId);
+  if (!question) {
+    return res.status(404).json({ error: 'Question not found in this attempt.' });
+  }
+
+  if (selectedIndex < 0 || selectedIndex >= question.options.length) {
+    return res.status(400).json({ error: 'Invalid option index.' });
+  }
+
+  const isCorrect = selectedIndex === question.correctIndex;
+  const lockedRecord: ServerLockedAnswer = {
+    questionId,
+    selectedIndex,
+    lockedAt: new Date().toISOString(),
+    isCorrect,
+  };
+
+  attempt.lockedAnswers[questionId] = lockedRecord;
+  // Remove from markedForReview once locked
+  attempt.markedForReview = attempt.markedForReview.filter((id) => id !== questionId);
+  if (typeof timeTakenSeconds === 'number' && timeTakenSeconds >= 0) {
+    attempt.timeTakenSeconds = Math.max(attempt.timeTakenSeconds, Math.round(timeTakenSeconds));
+  }
+
+  return res.json({
+    locked: true,
+    attempt: sanitizeAttemptForClient(attempt),
   });
+});
 
-  // 4. Toggle Mark for Review (only allowed for UNANSWERED questions)
-  app.post('/api/quiz/toggle-review', (req, res) => {
-    const { attemptId, questionId } = req.body || {};
-    const attempt = serverAttempts.get(attemptId);
-    if (!attempt) {
-      return res.status(404).json({ error: 'Attempt not found.' });
-    }
-    if (attempt.status === 'completed' || attempt.lockedAnswers[questionId]) {
-      return res.status(409).json({
-        error: 'Locked questions cannot be modified.',
-        attempt: sanitizeAttemptForClient(attempt),
-      });
-    }
-    if (attempt.markedForReview.includes(questionId)) {
-      attempt.markedForReview = attempt.markedForReview.filter((id) => id !== questionId);
-    } else {
-      attempt.markedForReview.push(questionId);
-    }
-    return res.json({ attempt: sanitizeAttemptForClient(attempt) });
-  });
+// 4. Toggle Mark for Review (only allowed for UNANSWERED questions)
+app.post('/api/quiz/toggle-review', (req, res) => {
+  const {
+    attemptId,
+    questionId,
+    serverStateToken,
+    lockedAnswersSnapshot,
+    markedForReviewSnapshot,
+  } = req.body || {};
+  const attempt = resolveServerAttempt(
+    attemptId,
+    serverStateToken,
+    lockedAnswersSnapshot,
+    markedForReviewSnapshot
+  );
+  if (!attempt) {
+    return res.status(404).json({ error: 'Attempt not found.' });
+  }
+  if (attempt.status === 'completed' || attempt.lockedAnswers[questionId]) {
+    return res.status(409).json({
+      error: 'Locked questions cannot be modified.',
+      attempt: sanitizeAttemptForClient(attempt),
+    });
+  }
+  if (attempt.markedForReview.includes(questionId)) {
+    attempt.markedForReview = attempt.markedForReview.filter((id) => id !== questionId);
+  } else {
+    attempt.markedForReview.push(questionId);
+  }
+  return res.json({ attempt: sanitizeAttemptForClient(attempt) });
+});
 
-  // 5. Final Quiz Submission & Official Grading (Sections 9, 10, 12)
-  app.post('/api/quiz/submit', (req, res) => {
-    const { attemptId, timeTakenSeconds = 0 } = req.body || {};
-    const attempt = serverAttempts.get(attemptId);
-    if (!attempt) {
-      return res.status(404).json({ error: 'Quiz attempt not found on server.' });
-    }
+// 5. Final Quiz Submission & Official Grading (Sections 9, 10, 12)
+app.post('/api/quiz/submit', (req, res) => {
+  const {
+    attemptId,
+    timeTakenSeconds = 0,
+    serverStateToken,
+    lockedAnswersSnapshot,
+  } = req.body || {};
+  const attempt = resolveServerAttempt(attemptId, serverStateToken, lockedAnswersSnapshot);
+  if (!attempt) {
+    return res.status(404).json({ error: 'Quiz attempt not found on server.' });
+  }
 
-    if (attempt.status !== 'completed') {
-      attempt.status = 'completed';
-      attempt.completedAt = new Date().toISOString();
-      attempt.timeTakenSeconds = Math.max(
-        attempt.timeTakenSeconds,
-        Math.round(Number(timeTakenSeconds) || 0)
-      );
-      attempt.scoreSummary = computeScoreSummary(attempt, attempt.timeTakenSeconds);
-    }
+  if (attempt.status !== 'completed') {
+    attempt.status = 'completed';
+    attempt.completedAt = new Date().toISOString();
+    attempt.timeTakenSeconds = Math.max(
+      attempt.timeTakenSeconds,
+      Math.round(Number(timeTakenSeconds) || 0)
+    );
+    attempt.scoreSummary = computeScoreSummary(attempt, attempt.timeTakenSeconds);
+  }
 
-    return res.json(sanitizeAttemptForClient(attempt));
-  });
+  return res.json(sanitizeAttemptForClient(attempt));
+});
 
-  // 6. Retrieve / Resume Attempt on Refresh (preserves locked answers, never unlocks)
-  app.get('/api/quiz/attempt/:attemptId', (req, res) => {
-    const attempt = serverAttempts.get(req.params.attemptId);
-    if (!attempt) {
-      return res.status(404).json({ error: 'Attempt not found.' });
-    }
-    return res.json(sanitizeAttemptForClient(attempt));
-  });
+// 6. Retrieve / Resume Attempt on Refresh (preserves locked answers, never unlocks)
+app.get('/api/quiz/attempt/:attemptId', (req, res) => {
+  const attempt = serverAttempts.get(req.params.attemptId);
+  if (!attempt) {
+    return res.status(404).json({ error: 'Attempt not found.' });
+  }
+  return res.json(sanitizeAttemptForClient(attempt));
+});
 
-  // 7. Retake Quiz — Creates a BRAND NEW attempt ID in the selected quizLanguage without modifying original attempt (Section 9)
-  app.post('/api/quiz/retake', async (req, res) => {
+// 7. Retake Quiz — Creates a BRAND NEW attempt ID in the selected quizLanguage without modifying original attempt (Section 9)
+app.post('/api/quiz/retake', async (req, res) => {
+  try {
     const {
       originalAttemptId,
       originalConfig,
       originalQuestions,
+      serverStateToken,
       quizLanguage,
       userId = 'local_student',
     } = req.body || {};
-    const memOriginal = serverAttempts.get(originalAttemptId);
+    const memOriginal =
+      resolveServerAttempt(originalAttemptId, serverStateToken) ||
+      serverAttempts.get(originalAttemptId);
+
     if (!memOriginal && (!originalConfig || !Array.isArray(originalQuestions))) {
       return res.status(404).json({ error: 'Original attempt not found on server.' });
     }
@@ -1480,6 +1705,7 @@ CRITICAL RULES:
         : baseConfig.quizLanguage;
 
     let retakeQuestions: ServerQuestion[] = [];
+    let resolvedModelName = ACTIVE_GEMINI_MODEL;
 
     if (targetLang === baseConfig.quizLanguage && memOriginal) {
       retakeQuestions = baseQuestions.map((q) => ({
@@ -1498,8 +1724,7 @@ CRITICAL RULES:
               ? 'Hindi (हिन्दी)'
               : 'English';
 
-          const response = await ai.models.generateContent({
-            model: ACTIVE_GEMINI_MODEL,
+          const { response, modelUsed } = await generateContentWithModelFallback(ai, {
             contents: `Translate and adapt the following Class ${baseConfig.classLevel} (${baseConfig.subject}) quiz questions into ${langName} (language code: ${targetLang}). Keep the exact same academic concepts, options order, and correctIndex:\n${JSON.stringify(
               baseQuestions.map((q) => ({
                 questionText: q.questionText,
@@ -1544,22 +1769,26 @@ CRITICAL RULES:
               },
             },
           });
-          const parsed = JSON.parse(response.text?.trim() || '[]');
-          if (Array.isArray(parsed)) {
-            for (let i = 0; i < parsed.length; i++) {
-              const v = validateAndNormalizeQuestion(
-                parsed[i],
-                {
-                  classLevel: baseConfig.classLevel,
-                  subject: baseConfig.subject,
-                  quizLanguage: targetLang,
-                  topic: baseConfig.topic,
-                  difficulty: baseConfig.difficulty,
-                },
-                i
-              );
-              if (v) retakeQuestions.push(v);
-            }
+          resolvedModelName = modelUsed;
+          const parsed = parseGeminiJsonSafe(response?.text);
+          const candidateArray = Array.isArray(parsed)
+            ? parsed
+            : Array.isArray(parsed?.questions)
+            ? parsed.questions
+            : [];
+          for (let i = 0; i < candidateArray.length; i++) {
+            const v = validateAndNormalizeQuestion(
+              candidateArray[i],
+              {
+                classLevel: baseConfig.classLevel,
+                subject: baseConfig.subject,
+                quizLanguage: targetLang,
+                topic: baseConfig.topic,
+                difficulty: baseConfig.difficulty,
+              },
+              i
+            );
+            if (v) retakeQuestions.push(v);
           }
         } catch (err) {
           console.error('Retake language adaptation fallback:', err);
@@ -1602,7 +1831,7 @@ CRITICAL RULES:
       startedAt: new Date().toISOString(),
       timeTakenSeconds: 0,
       generationInfo: {
-        model: ACTIVE_GEMINI_MODEL,
+        model: resolvedModelName,
         source: memOriginal?.generationInfo?.source || 'verified-curriculum-engine',
         excludedHistoryCount: memOriginal?.generationInfo?.excludedHistoryCount || 0,
         uniqueConceptsCount: retakeQuestions.length,
@@ -1612,220 +1841,224 @@ CRITICAL RULES:
 
     serverAttempts.set(newAttemptId, newAttempt);
     return res.json(sanitizeAttemptForClient(newAttempt));
-  });
+  } catch (err: any) {
+    console.error('Error in /api/quiz/retake:', err);
+    return res.status(500).json({ error: err?.message || 'Failed to create retake session.' });
+  }
+});
 
-  // 8. Launch Interactive Locked Quiz from Study Note MCQs
-  app.post('/api/quiz/from-notes', (req, res) => {
-    const {
-      mcqs = [],
-      classLevel = 8,
-      subject = 'life_science',
-      quizLanguage = 'en',
-      topic = 'Study Notes Revision',
-      userId = 'local_student',
-    } = req.body || {};
+// 8. Launch Interactive Locked Quiz from Study Note MCQs
+app.post('/api/quiz/from-notes', (req, res) => {
+  const {
+    mcqs = [],
+    classLevel = 8,
+    subject = 'life_science',
+    quizLanguage = 'en',
+    topic = 'Study Notes Revision',
+    userId = 'local_student',
+  } = req.body || {};
 
-    if (!Array.isArray(mcqs) || mcqs.length === 0) {
-      return res.status(400).json({ error: 'No MCQs provided to create quiz.' });
-    }
+  if (!Array.isArray(mcqs) || mcqs.length === 0) {
+    return res.status(400).json({ error: 'No MCQs provided to create quiz.' });
+  }
 
-    const validQuizLang: 'en' | 'bn' | 'hi' =
-      quizLanguage === 'bn' || quizLanguage === 'hi' ? quizLanguage : 'en';
+  const validQuizLang: 'en' | 'bn' | 'hi' =
+    quizLanguage === 'bn' || quizLanguage === 'hi' ? quizLanguage : 'en';
 
-    const validated: ServerQuestion[] = [];
-    for (let i = 0; i < mcqs.length; i++) {
-      const v = validateAndNormalizeQuestion(
-        { ...mcqs[i], questionType: 'mcq' },
-        {
-          classLevel: Number(classLevel) || 8,
-          subject,
-          quizLanguage: validQuizLang,
-          topic,
-          difficulty: 'medium',
-        },
-        i
-      );
-      if (v) validated.push(v);
-    }
-
-    if (validated.length === 0) {
-      return res.status(400).json({ error: 'Could not validate questions from notes.' });
-    }
-
-    const attemptId = `att_notes_${Date.now()}_${crypto.randomBytes(3).toString('hex')}`;
-    const attempt: ServerQuizAttempt = {
-      attemptId,
-      userId,
-      config: {
+  const validated: ServerQuestion[] = [];
+  for (let i = 0; i < mcqs.length; i++) {
+    const v = validateAndNormalizeQuestion(
+      { ...mcqs[i], questionType: 'mcq' },
+      {
         classLevel: Number(classLevel) || 8,
         subject,
         quizLanguage: validQuizLang,
         topic,
-        difficulty: 'mixed',
-        questionCount: validated.length,
-        questionType: 'mcq',
-        durationMinutes: 10,
-        mode: 'practice',
+        difficulty: 'medium',
       },
-      questions: validated,
-      lockedAnswers: {},
-      markedForReview: [],
-      status: 'in_progress',
-      startedAt: new Date().toISOString(),
-      timeTakenSeconds: 0,
-      generationInfo: {
-        model: ACTIVE_GEMINI_MODEL,
-        source: 'gemini-ai',
-        excludedHistoryCount: 0,
-        uniqueConceptsCount: validated.length,
-        notice: 'Generated directly from your Study Notes.',
-      },
-    };
+      i
+    );
+    if (v) validated.push(v);
+  }
 
-    serverAttempts.set(attemptId, attempt);
-    return res.json(sanitizeAttemptForClient(attempt));
-  });
+  if (validated.length === 0) {
+    return res.status(400).json({ error: 'Could not validate questions from notes.' });
+  }
 
-  // 9. Reset Per-User Question History
-  app.post('/api/quiz/reset-history', (req, res) => {
-    const { userId = 'local_student' } = req.body || {};
-    userFingerprintsHistory.delete(userId);
-    userConceptHistory.delete(userId);
-    return res.json({ reset: true });
-  });
+  const attemptId = `att_notes_${Date.now()}_${crypto.randomBytes(3).toString('hex')}`;
+  const attempt: ServerQuizAttempt = {
+    attemptId,
+    userId,
+    config: {
+      classLevel: Number(classLevel) || 8,
+      subject,
+      quizLanguage: validQuizLang,
+      topic,
+      difficulty: 'mixed',
+      questionCount: validated.length,
+      questionType: 'mcq',
+      durationMinutes: 10,
+      mode: 'practice',
+    },
+    questions: validated,
+    lockedAnswers: {},
+    markedForReview: [],
+    status: 'in_progress',
+    startedAt: new Date().toISOString(),
+    timeTakenSeconds: 0,
+    generationInfo: {
+      model: ACTIVE_GEMINI_MODEL,
+      source: 'gemini-ai',
+      excludedHistoryCount: 0,
+      uniqueConceptsCount: validated.length,
+      notice: 'Generated directly from your Study Notes.',
+    },
+  };
 
-  // 10. Study Notes & AI Revision Tools Endpoint (Section 13)
-  app.post('/api/notes/process', async (req, res) => {
-    try {
-      const {
-        title = 'Study Notes',
-        sourceText = '',
-        fileData,
-        classLevel = 8,
-        subject = 'life_science',
-        inputLanguage = 'en',
-        outputLanguage = 'en',
-        userId = 'local_student',
-      } = req.body || {};
+  serverAttempts.set(attemptId, attempt);
+  return res.json(sanitizeAttemptForClient(attempt));
+});
 
-      const rateKey = `${userId || req.ip || 'anon'}_notes`;
-      const limitCheck = checkRateLimit(rateKey);
-      if (!limitCheck.allowed) {
-        return res.status(429).json({
-          error: `Rate limit reached. Please wait ${limitCheck.retryAfterSeconds} seconds.`,
-        });
-      }
+// 9. Reset Per-User Question History
+app.post('/api/quiz/reset-history', (req, res) => {
+  const { userId = 'local_student' } = req.body || {};
+  userFingerprintsHistory.delete(userId);
+  userConceptHistory.delete(userId);
+  return res.json({ reset: true });
+});
 
-      if ((!sourceText || sourceText.trim().length < 10) && !fileData?.base64) {
-        return res.status(400).json({
-          error: 'Please provide study notes text or upload a supported document.',
-        });
-      }
+// 10. Study Notes & AI Revision Tools Endpoint (Section 13)
+app.post('/api/notes/process', async (req, res) => {
+  try {
+    const {
+      title = 'Study Notes',
+      sourceText = '',
+      fileData,
+      classLevel = 8,
+      subject = 'life_science',
+      inputLanguage = 'en',
+      outputLanguage = 'en',
+      userId = 'local_student',
+    } = req.body || {};
 
-      const outLangName =
-        outputLanguage === 'bn'
-          ? 'Bengali (বাংলা)'
-          : outputLanguage === 'hi'
-          ? 'Hindi (हिन्दी)'
-          : 'English';
+    const rateKey = `${userId || req.ip || 'anon'}_notes`;
+    const limitCheck = checkRateLimit(rateKey);
+    if (!limitCheck.allowed) {
+      return res.status(429).json({
+        error: `Rate limit reached. Please wait ${limitCheck.retryAfterSeconds} seconds.`,
+      });
+    }
 
-      const inLangName =
-        inputLanguage === 'bn'
-          ? 'Bengali (বাংলা)'
-          : inputLanguage === 'hi'
-          ? 'Hindi (हिन्दी)'
-          : 'English';
+    if ((!sourceText || sourceText.trim().length < 10) && !fileData?.base64) {
+      return res.status(400).json({
+        error: 'Please provide study notes text or upload a supported document.',
+      });
+    }
 
-      const ai = getAiClient();
-      if (ai) {
-        try {
-          const parts: any[] = [];
-          if (fileData?.base64 && fileData?.mimeType) {
-            parts.push({
-              inlineData: {
-                mimeType: fileData.mimeType,
-                data: fileData.base64,
-              },
-            });
-          }
+    const outLangName =
+      outputLanguage === 'bn'
+        ? 'Bengali (বাংলা)'
+        : outputLanguage === 'hi'
+        ? 'Hindi (हिन्दी)'
+        : 'English';
+
+    const inLangName =
+      inputLanguage === 'bn'
+        ? 'Bengali (বাংলা)'
+        : inputLanguage === 'hi'
+        ? 'Hindi (हिन्दी)'
+        : 'English';
+
+    const ai = getAiClient();
+    if (ai) {
+      try {
+        const parts: any[] = [];
+        if (fileData?.base64 && fileData?.mimeType) {
           parts.push({
-            text: `Analyze the following Class ${classLevel} (${subject}) study notes (Input Language: ${inLangName}) and produce a complete revision package in ${outLangName} (Output Language code: ${outputLanguage}).
+            inlineData: {
+              mimeType: fileData.mimeType,
+              data: fileData.base64,
+            },
+          });
+        }
+        parts.push({
+          text: `Analyze the following Class ${classLevel} (${subject}) study notes (Input Language: ${inLangName}) and produce a complete revision package in ${outLangName} (Output Language code: ${outputLanguage}).
 Title: ${title}
 Notes Content:
 ${sourceText.slice(0, 18000)}`,
-          });
+        });
 
-          const response = await ai.models.generateContent({
-            model: ACTIVE_GEMINI_MODEL,
-            contents: { parts },
-            config: {
-              systemInstruction: `You are an expert tutor for Class ${classLevel} students.
+        const { response, modelUsed } = await generateContentWithModelFallback(ai, {
+          contents: { parts },
+          config: {
+            systemInstruction: `You are an expert tutor for Class ${classLevel} students.
 Regardless of the input note language (${inLangName}), write all output fields (summary, keyConcepts, flashcards, and 5 MCQs) strictly in ${outLangName}.
 Make explanations clear, student-friendly, and factually accurate.`,
-              responseMimeType: 'application/json',
-              responseSchema: {
-                type: Type.OBJECT,
-                properties: {
-                  title: { type: Type.STRING },
-                  summary: {
-                    type: Type.STRING,
-                    description: `Clear, simple-language summary in ${outLangName}`,
-                  },
-                  keyConcepts: {
-                    type: Type.ARRAY,
-                    items: {
-                      type: Type.OBJECT,
-                      properties: {
-                        term: { type: Type.STRING },
-                        explanation: { type: Type.STRING },
-                        example: { type: Type.STRING },
-                      },
-                      required: ['term', 'explanation', 'example'],
+            responseMimeType: 'application/json',
+            responseSchema: {
+              type: Type.OBJECT,
+              properties: {
+                title: { type: Type.STRING },
+                summary: {
+                  type: Type.STRING,
+                  description: `Clear, simple-language summary in ${outLangName}`,
+                },
+                keyConcepts: {
+                  type: Type.ARRAY,
+                  items: {
+                    type: Type.OBJECT,
+                    properties: {
+                      term: { type: Type.STRING },
+                      explanation: { type: Type.STRING },
+                      example: { type: Type.STRING },
                     },
-                  },
-                  flashcards: {
-                    type: Type.ARRAY,
-                    items: {
-                      type: Type.OBJECT,
-                      properties: {
-                        front: { type: Type.STRING },
-                        back: { type: Type.STRING },
-                      },
-                      required: ['front', 'back'],
-                    },
-                  },
-                  mcqs: {
-                    type: Type.ARRAY,
-                    items: {
-                      type: Type.OBJECT,
-                      properties: {
-                        questionText: { type: Type.STRING },
-                        options: {
-                          type: Type.ARRAY,
-                          items: { type: Type.STRING },
-                        },
-                        correctIndex: { type: Type.INTEGER },
-                        explanation: { type: Type.STRING },
-                        topic: { type: Type.STRING },
-                        difficulty: { type: Type.STRING },
-                      },
-                      required: [
-                        'questionText',
-                        'options',
-                        'correctIndex',
-                        'explanation',
-                        'topic',
-                        'difficulty',
-                      ],
-                    },
+                    required: ['term', 'explanation', 'example'],
                   },
                 },
-                required: ['title', 'summary', 'keyConcepts', 'flashcards', 'mcqs'],
+                flashcards: {
+                  type: Type.ARRAY,
+                  items: {
+                    type: Type.OBJECT,
+                    properties: {
+                      front: { type: Type.STRING },
+                      back: { type: Type.STRING },
+                    },
+                    required: ['front', 'back'],
+                  },
+                },
+                mcqs: {
+                  type: Type.ARRAY,
+                  items: {
+                    type: Type.OBJECT,
+                    properties: {
+                      questionText: { type: Type.STRING },
+                      options: {
+                        type: Type.ARRAY,
+                        items: { type: Type.STRING },
+                      },
+                      correctIndex: { type: Type.INTEGER },
+                      explanation: { type: Type.STRING },
+                      topic: { type: Type.STRING },
+                      difficulty: { type: Type.STRING },
+                    },
+                    required: [
+                      'questionText',
+                      'options',
+                      'correctIndex',
+                      'explanation',
+                      'topic',
+                      'difficulty',
+                    ],
+                  },
+                },
               },
+              required: ['title', 'summary', 'keyConcepts', 'flashcards', 'mcqs'],
             },
-          });
+          },
+        });
 
-          const parsed = JSON.parse(response.text?.trim() || '{}');
+        const parsed = parseGeminiJsonSafe(response?.text);
+        if (parsed && typeof parsed === 'object' && typeof parsed.summary === 'string') {
           const cleanMcqs = (Array.isArray(parsed.mcqs) ? parsed.mcqs : [])
             .map((m: any, idx: number) => ({
               id: `note_mcq_${Date.now()}_${idx}`,
@@ -1848,73 +2081,103 @@ Make explanations clear, student-friendly, and factually accurate.`,
             keyConcepts: Array.isArray(parsed.keyConcepts) ? parsed.keyConcepts : [],
             flashcards: Array.isArray(parsed.flashcards) ? parsed.flashcards : [],
             mcqs: cleanMcqs,
-            modelUsed: ACTIVE_GEMINI_MODEL,
+            modelUsed,
           });
-        } catch (aiErr: any) {
-          console.error('Gemini study notes fallback:', aiErr?.message || aiErr);
         }
+      } catch (aiErr: any) {
+        console.error('Gemini study notes fallback:', aiErr?.message || aiErr);
       }
-
-      // Structured fallback summary if quota is exhausted or key not configured
-      const sentences = (sourceText || title)
-        .split(/[.।?!\n]+/)
-        .map((s: string) => s.trim())
-        .filter((s: string) => s.length > 10);
-
-      const fallbackQuestions = generateVerifiedCurriculumQuestions(
-        {
-          classLevel: Number(classLevel) || 8,
-          subject,
-          quizLanguage: outputLanguage === 'bn' || outputLanguage === 'hi' ? outputLanguage : 'en',
-          topic: title,
-          difficulty: 'mixed',
-          questionCount: 5,
-          questionType: 'mcq',
-        },
-        new Set(),
-        new Set()
-      );
-
-      return res.json({
-        title: title || 'Study Revision Note',
-        summary:
-          sentences.slice(0, 4).join('. ') ||
-          'Structured summary prepared from your study notes.',
-        keyConcepts: [
-          {
-            term: title || `Class ${classLevel} Core Concept`,
-            explanation:
-              sentences[0] ||
-              'Fundamental principle highlighted in your uploaded study passage.',
-            example:
-              sentences[1] || 'Applied in standard WBBSE/WBBPE classroom exercises.',
-          },
-        ],
-        flashcards: fallbackQuestions.slice(0, 4).map((q) => ({
-          front: q.questionText,
-          back: `${q.options[q.correctIndex]} — ${q.explanation}`,
-        })),
-        mcqs: fallbackQuestions.map((q) => ({
-          id: q.id,
-          questionText: q.questionText,
-          options: q.options,
-          correctIndex: q.correctIndex,
-          explanation: q.explanation,
-          topic: q.topic,
-          difficulty: q.difficulty,
-        })),
-        modelUsed: `${ACTIVE_GEMINI_MODEL} (Structured Local Fallback)`,
-        notice:
-          'Generated using structured text extraction because Gemini API quota was temporarily unavailable.',
-      });
-    } catch (err: any) {
-      console.error('Error in /api/notes/process:', err);
-      return res.status(500).json({ error: err?.message || 'Failed to process study notes.' });
     }
-  });
 
+    // Structured fallback summary if quota is exhausted or key not configured
+    const sentences = (sourceText || title)
+      .split(/[.।?!\n]+/)
+      .map((s: string) => s.trim())
+      .filter((s: string) => s.length > 10);
+
+    const fallbackQuestions = generateVerifiedCurriculumQuestions(
+      {
+        classLevel: Number(classLevel) || 8,
+        subject,
+        quizLanguage: outputLanguage === 'bn' || outputLanguage === 'hi' ? outputLanguage : 'en',
+        topic: title,
+        difficulty: 'mixed',
+        questionCount: 5,
+        questionType: 'mcq',
+      },
+      new Set(),
+      new Set()
+    );
+
+    return res.json({
+      title: title || 'Study Revision Note',
+      summary:
+        sentences.slice(0, 4).join('. ') ||
+        'Structured summary prepared from your study notes.',
+      keyConcepts: [
+        {
+          term: title || `Class ${classLevel} Core Concept`,
+          explanation:
+            sentences[0] ||
+            'Fundamental principle highlighted in your uploaded study passage.',
+          example:
+            sentences[1] || 'Applied in standard WBBSE/WBBPE classroom exercises.',
+        },
+      ],
+      flashcards: fallbackQuestions.slice(0, 4).map((q) => ({
+        front: q.questionText,
+        back: `${q.options[q.correctIndex]} — ${q.explanation}`,
+      })),
+      mcqs: fallbackQuestions.map((q) => ({
+        id: q.id,
+        questionText: q.questionText,
+        options: q.options,
+        correctIndex: q.correctIndex,
+        explanation: q.explanation,
+        topic: q.topic,
+        difficulty: q.difficulty,
+      })),
+      modelUsed: `${ACTIVE_GEMINI_MODEL} (Structured Local Fallback)`,
+      notice:
+        'Generated using structured text extraction because Gemini API quota was temporarily unavailable.',
+    });
+  } catch (err: any) {
+    console.error('Error in /api/notes/process:', err);
+    return res.status(500).json({ error: err?.message || 'Failed to process study notes.' });
+  }
+});
+
+// Ensure unknown /api/* routes always return valid JSON (never HTML/plain-text 404)
+app.all('/api/*', (req, res) => {
+  res.status(404).json({
+    error: `API route not found: ${req.method} ${req.originalUrl}`,
+  });
+});
+
+// Global Express JSON error handler for /api/* requests
+app.use(
+  (
+    err: any,
+    req: express.Request,
+    res: express.Response,
+    next: express.NextFunction
+  ) => {
+    if (req.path.startsWith('/api')) {
+      console.error('Unhandled API Error:', err);
+      const status = typeof err?.status === 'number' ? err.status : 500;
+      res.status(status).json({
+        error: err?.message || 'Internal server error processing API request.',
+      });
+      return;
+    }
+    next(err);
+  }
+);
+
+async function startServer() {
   // Vite middleware for development vs static serving for production
   if (process.env.NODE_ENV !== 'production') {
+    const { createServer: createViteServer } = await import('vite');
     const vite = await createViteServer({
       server: { middlewareMode: true },
       appType: 'spa',
@@ -1933,4 +2196,9 @@ Make explanations clear, student-friendly, and factually accurate.`,
   });
 }
 
-startServer();
+// Start standalone HTTP listener when not running inside Vercel Serverless Functions
+if (!process.env.VERCEL) {
+  startServer();
+}
+
+export default app;

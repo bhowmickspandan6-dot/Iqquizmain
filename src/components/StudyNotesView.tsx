@@ -21,6 +21,7 @@ import {
 } from '../types';
 import { t, LANGUAGE_LABELS } from '../i18n/translations';
 import { CLASS_LEVELS, SUBJECT_LIST, getSubjectDefinition } from '../data/curriculum';
+import { safeFetchJson, validateStudyNotesPayload } from '../utils/apiClient';
 
 interface StudyNotesViewProps {
   interfaceLanguage: LanguageCode;
@@ -161,7 +162,7 @@ export const StudyNotesView: React.FC<StudyNotesViewProps> = ({
     setProcessing(true);
     setFlippedCards({});
     try {
-      const res = await fetch('/api/notes/process', {
+      const rawData = await safeFetchJson('/api/notes/process', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -177,11 +178,8 @@ export const StudyNotesView: React.FC<StudyNotesViewProps> = ({
           userId,
         }),
       });
-      const data = await res.json();
-      if (!res.ok) {
-        throw new Error(data.error || 'Failed to analyze study notes.');
-      }
-      setAnalysis(data);
+      const validated = validateStudyNotesPayload(rawData);
+      setAnalysis(validated);
     } catch (err: any) {
       setError(err?.message || 'Error processing study notes.');
     } finally {

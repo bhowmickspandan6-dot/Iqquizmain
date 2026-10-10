@@ -102,6 +102,7 @@ export interface QuizAttemptState {
   completedAt?: string;
   timeTakenSeconds: number;
   scoreSummary?: QuizScoreSummary;
+  serverStateToken?: string;
   generationInfo: {
     model: string;
     source: 'gemini-ai' | 'verified-curriculum-engine';

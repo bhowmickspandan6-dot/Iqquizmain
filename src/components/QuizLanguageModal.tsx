@@ -66,12 +66,12 @@ export const QuizLanguageModal: React.FC<QuizLanguageModalProps> = ({
   onConfirmLanguageAndStart,
   onClose,
 }) => {
-  // CRITICAL: Do not automatically select a language.
-  // Require the student to make an explicit selection for every new quiz attempt.
+  // CRITICAL: Do not automatically select a language when opening a new quiz session.
+  // Preserve the user's explicit selection across retries if an error occurs.
   const [selectedLang, setSelectedLang] = useState<LanguageCode | null>(null);
 
   useEffect(() => {
-    if (pendingLaunch) {
+    if (!pendingLaunch) {
       setSelectedLang(null);
     }
   }, [pendingLaunch]);
