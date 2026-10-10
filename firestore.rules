@@ -350,5 +350,70 @@ service cloud.firestore {
       allow update: if false;
       allow delete: if isSignedIn() && isValidId(historyId) && existing().userId == request.auth.uid;
     }
+
+    // Blueprint Validation Helper: ChatConversation
+    function isValidChatConversation(data) {
+      return data.keys().hasAll([
+          'chatId',
+          'userId',
+          'title',
+          'language',
+          'messagesJson',
+          'messageCount',
+          'createdAt',
+          'updatedAt'
+        ]) &&
+        data.keys().hasOnly([
+          'chatId',
+          'userId',
+          'title',
+          'language',
+          'messagesJson',
+          'messageCount',
+          'createdAt',
+          'updatedAt'
+        ]) &&
+        isValidId(data.chatId) &&
+        isValidId(data.userId) &&
+        data.userId == request.auth.uid &&
+        data.title is string && data.title.size() >= 1 && data.title.size() <= 200 &&
+        isValidLanguage(data.language) &&
+        data.messagesJson is string && data.messagesJson.size() >= 2 && data.messagesJson.size() <= 60000 &&
+        data.messageCount is int && data.messageCount >= 0 && data.messageCount <= 200 &&
+        data.createdAt is timestamp &&
+        data.updatedAt is timestamp;
+    }
+
+    // Collection: /chatConversations/{chatId}
+    match /chatConversations/{chatId} {
+      allow get: if isSignedIn() && isValidId(chatId) && existing().userId == request.auth.uid;
+      allow list: if isSignedIn() && existing().userId == request.auth.uid;
+
+      allow create: if isSignedIn() &&
+        isValidId(chatId) &&
+        isValidChatConversation(incoming()) &&
+        incoming().chatId == chatId &&
+        incoming().createdAt == request.time &&
+        incoming().updatedAt == request.time;
+
+      allow update: if isSignedIn() &&
+        isValidId(chatId) &&
+        isValidChatConversation(incoming()) &&
+        existing().userId == request.auth.uid &&
+        incoming().userId == existing().userId &&
+        incoming().chatId == existing().chatId &&
+        incoming().createdAt == existing().createdAt &&
+        incoming().updatedAt == request.time &&
+        incoming().diff(existing()).affectedKeys().hasOnly([
+          'title',
+          'language',
+          'messagesJson',
+          'messageCount',
+          'updatedAt'
+        ]);
+
+      allow delete: if isSignedIn() && isValidId(chatId) && existing().userId == request.auth.uid;
+    }
   }
 }
+

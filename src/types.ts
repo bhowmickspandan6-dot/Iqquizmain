@@ -21,6 +21,7 @@ export type QuizMode = 'practice' | 'test';
 
 export type NavSection =
   | 'dashboard'
+  | 'ai_chat'
   | 'take_quiz'
   | 'practice_tests'
   | 'study_notes'
@@ -170,3 +171,25 @@ export interface SavedStudyNote {
   analysis: StudyNoteAnalysis;
   createdAt: string;
 }
+
+export type ChatLanguagePreference = 'auto' | LanguageCode;
+
+export interface ChatMessage {
+  id: string;
+  role: 'user' | 'assistant';
+  content: string;
+  timestamp: string;
+  language?: LanguageCode;
+  modelUsed?: string;
+}
+
+export interface ChatConversation {
+  chatId: string;
+  userId: string;
+  title: string;
+  language: LanguageCode;
+  messages: ChatMessage[];
+  createdAt: string;
+  updatedAt: string;
+}
+

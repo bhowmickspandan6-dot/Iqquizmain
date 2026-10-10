@@ -414,3 +414,118 @@ export async function clearUserQuestionHistoryFromFirestore(user: User): Promise
   }
 }
 
+export async function saveChatConversationToFirestore(
+  user: User,
+  conversation: {
+    chatId: string;
+    title: string;
+    language: LanguageCode;
+    messages: any[];
+  }
+): Promise<void> {
+  if (!user.emailVerified) return;
+  const uid = sanitizeId(user.uid);
+  const rawChatId = sanitizeId(conversation.chatId);
+  const docId = rawChatId.startsWith(`${uid}_`) ? rawChatId : sanitizeId(`${uid}_${rawChatId}`);
+  const path = `chatConversations/${docId}`;
+  const ref = doc(db, 'chatConversations', docId);
+
+  const boundedMessages = Array.isArray(conversation.messages)
+    ? conversation.messages.slice(-60)
+    : [];
+  const messagesJson = clampString(JSON.stringify(boundedMessages), 2, 58000, '[]');
+  const messageCount = Math.max(0, Math.min(200, boundedMessages.length));
+  const title = clampString(conversation.title, 1, 200, 'New Chat');
+  const language: LanguageCode =
+    conversation.language === 'bn' || conversation.language === 'hi'
+      ? conversation.language
+      : 'en';
+
+  try {
+    const existingSnap = await getDoc(ref);
+    if (!existingSnap.exists()) {
+      await setDoc(ref, {
+        chatId: docId,
+        userId: uid,
+        title,
+        language,
+        messagesJson,
+        messageCount,
+        createdAt: serverTimestamp(),
+        updatedAt: serverTimestamp(),
+      });
+    } else {
+      await updateDoc(ref, {
+        title,
+        language,
+        messagesJson,
+        messageCount,
+        updatedAt: serverTimestamp(),
+      });
+    }
+  } catch (error) {
+    console.warn('Could not sync chat conversation to Firestore:', path, error);
+  }
+}
+
+export async function loadUserChatsFromFirestore(user: User): Promise<any[]> {
+  if (!user.emailVerified) return [];
+  const uid = sanitizeId(user.uid);
+  try {
+    const q = query(collection(db, 'chatConversations'), where('userId', '==', uid));
+    const snap = await getDocs(q);
+    return snap.docs.map((d) => {
+      const data = d.data();
+      let parsedMessages: any[] = [];
+      try {
+        const parsed = JSON.parse(String(data.messagesJson || '[]'));
+        if (Array.isArray(parsed)) parsedMessages = parsed;
+      } catch {
+        parsedMessages = [];
+      }
+      return {
+        chatId: String(data.chatId || d.id),
+        userId: String(data.userId || uid),
+        title: String(data.title || 'Conversation'),
+        language: (data.language === 'bn' || data.language === 'hi' ? data.language : 'en') as LanguageCode,
+        messages: parsedMessages,
+        createdAt: new Date().toISOString(),
+        updatedAt: new Date().toISOString(),
+      };
+    });
+  } catch (error) {
+    console.warn('Could not load chat conversations from Firestore:', error);
+    return [];
+  }
+}
+
+export async function deleteChatConversationFromFirestore(
+  user: User,
+  chatId: string
+): Promise<void> {
+  if (!user.emailVerified) return;
+  const uid = sanitizeId(user.uid);
+  const rawChatId = sanitizeId(chatId);
+  const docId = rawChatId.startsWith(`${uid}_`) ? rawChatId : sanitizeId(`${uid}_${rawChatId}`);
+  try {
+    await deleteDoc(doc(db, 'chatConversations', docId));
+  } catch (error) {
+    console.warn('Could not delete chat conversation from Firestore:', error);
+  }
+}
+
+export async function clearUserChatsFromFirestore(user: User): Promise<void> {
+  if (!user.emailVerified) return;
+  const uid = sanitizeId(user.uid);
+  try {
+    const q = query(collection(db, 'chatConversations'), where('userId', '==', uid));
+    const snap = await getDocs(q);
+    for (const d of snap.docs) {
+      await deleteDoc(doc(db, 'chatConversations', d.id));
+    }
+  } catch (error) {
+    console.warn('Could not clear chat conversations from Firestore:', error);
+  }
+}
+
+

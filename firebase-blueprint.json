@@ -392,6 +392,70 @@
         "questionText",
         "createdAt"
       ]
+    },
+    "ChatConversation": {
+      "title": "ChatConversation",
+      "description": "Stores a user's private AI Chat conversation history, messages JSON, and language metadata.",
+      "type": "object",
+      "properties": {
+        "chatId": {
+          "type": "string",
+          "description": "Unique conversation identifier",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "userId": {
+          "type": "string",
+          "description": "Owner UID of the user",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "title": {
+          "type": "string",
+          "description": "Conversation title",
+          "minLength": 1,
+          "maxLength": 200
+        },
+        "language": {
+          "type": "string",
+          "description": "Conversation language code",
+          "enum": ["en", "bn", "hi"],
+          "minLength": 2,
+          "maxLength": 5
+        },
+        "messagesJson": {
+          "type": "string",
+          "description": "Serialized JSON array of chat messages for this conversation",
+          "minLength": 2,
+          "maxLength": 60000
+        },
+        "messageCount": {
+          "type": "integer",
+          "description": "Total number of messages in the conversation"
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Creation server timestamp"
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Last update server timestamp"
+        }
+      },
+      "required": [
+        "chatId",
+        "userId",
+        "title",
+        "language",
+        "messagesJson",
+        "messageCount",
+        "createdAt",
+        "updatedAt"
+      ]
     }
   },
   "firestore": {
@@ -410,6 +474,11 @@
     "/questionHistory/{historyId}": {
       "schema": { "$ref": "#/entities/QuestionHistory" },
       "description": "Stores persistent question fingerprints, question stems, and semantic similarity signatures per user."
+    },
+    "/chatConversations/{chatId}": {
+      "schema": { "$ref": "#/entities/ChatConversation" },
+      "description": "Stores private per-user AI Chat conversations and message history."
     }
   }
 }
+

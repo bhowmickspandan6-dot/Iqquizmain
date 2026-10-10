@@ -2,17 +2,72 @@ import 'dotenv/config';
 import crypto from 'crypto';
 import { GoogleGenAI, ThinkingLevel, Type } from '@google/genai';
 
-// Official supported Gemini Flash models (fast, free-tier eligible, structured JSON output supported)
+// Official supported Gemini Flash models (each model family has independent per-model free-tier quota buckets)
 const SUPPORTED_GEMINI_MODELS = [
-  'gemini-flash-latest',
   'gemini-3-flash-preview',
+  'gemini-2.5-flash',
+  'gemini-2.5-flash-lite',
+  'gemini-flash-lite-latest',
+  'gemini-3.1-flash-lite-preview',
   'gemini-3.1-flash-lite',
+  'gemini-flash-latest',
   'gemini-3.8-flash',
 ];
 const configuredModel = (process.env.GEMINI_MODEL || '').trim();
 const ACTIVE_GEMINI_MODEL = SUPPORTED_GEMINI_MODELS.includes(configuredModel)
   ? configuredModel
-  : 'gemini-flash-latest';
+  : 'gemini-3-flash-preview';
+
+// Track per-model quota exhaustion or unavailability so subsequent requests immediately skip exhausted models
+const modelCooldownUntil = new Map<string, number>();
+
+function recordModelFailureCooldown(modelName: string, err: any): void {
+  const msg = String(err?.message || err || '').toLowerCase();
+  const now = Date.now();
+
+  if (msg.includes('404') || msg.includes('not found') || msg.includes('not supported')) {
+    modelCooldownUntil.set(modelName, now + 60 * 60 * 1000);
+    return;
+  }
+
+  if (msg.includes('429') || msg.includes('resource_exhausted') || msg.includes('quota')) {
+    const isDailyQuota =
+      msg.includes('perday') ||
+      msg.includes('free_tier_requests') ||
+      msg.includes('retry in 6h') ||
+      msg.includes('retry in 5h') ||
+      msg.includes('retry in 4h') ||
+      msg.includes('retry in 3h') ||
+      msg.includes('retry in 2h') ||
+      msg.includes('retry in 1h');
+    const cooldownMs = isDailyQuota ? 30 * 60 * 1000 : 45 * 1000;
+    modelCooldownUntil.set(modelName, now + cooldownMs);
+
+    // If an alias like gemini-flash-latest resolved to gemini-3.8-flash, cool down both
+    if (msg.includes('gemini-3.8-flash')) {
+      modelCooldownUntil.set('gemini-3.8-flash', now + cooldownMs);
+      modelCooldownUntil.set('gemini-flash-latest', now + cooldownMs);
+    }
+  }
+}
+
+function getOrderedCandidateModels(): string[] {
+  const now = Date.now();
+  const baseList = Array.from(new Set([ACTIVE_GEMINI_MODEL, ...SUPPORTED_GEMINI_MODELS]));
+  const available: string[] = [];
+  const cooledDown: string[] = [];
+
+  for (const m of baseList) {
+    const until = modelCooldownUntil.get(m) || 0;
+    if (until > now) {
+      cooledDown.push(m);
+    } else {
+      available.push(m);
+    }
+  }
+
+  return [...available, ...cooledDown];
+}
 
 // Per-call timeout and bounded replacement passes so serverless functions never hang or loop infinitely
 const GEMINI_TIMEOUT_MS = 25000;
@@ -33,7 +88,7 @@ function logServerError(context: string, err: any, extra?: Record<string, any>) 
     code: err?.code || undefined,
     ...(extra || {}),
   };
-  console.error(`[IQ Quiz Server Error] ${context}:`, JSON.stringify(safeDetails));
+  console.warn(`[IQ Quiz Server Notice] ${context}:`, JSON.stringify(safeDetails));
 }
 
 function sanitizeEnvApiKey(raw: unknown): string {
@@ -141,20 +196,21 @@ async function generateContentWithModelFallback(
     config?: any;
   }
 ): Promise<{ response: any; modelUsed: string }> {
-  const candidateModels = Array.from(
-    new Set([ACTIVE_GEMINI_MODEL, ...SUPPORTED_GEMINI_MODELS])
-  );
+  const candidateModels = getOrderedCandidateModels();
   let lastError: any = null;
 
   for (let i = 0; i < candidateModels.length; i++) {
     const modelName = candidateModels[i];
     try {
       // Configure low-latency thinking per model family so structured JSON generation completes in ~2-4s
-      const thinkingConfig = modelName.startsWith('gemini-3')
-        ? { thinkingLevel: ThinkingLevel.LOW }
-        : modelName.startsWith('gemini-2.5') || modelName === 'gemini-flash-latest'
-        ? { thinkingBudget: 0 }
-        : undefined;
+      const thinkingConfig =
+        modelName === 'gemini-3-flash-preview' || modelName === 'gemini-3.8-flash'
+          ? { thinkingLevel: ThinkingLevel.LOW }
+          : modelName.startsWith('gemini-2.5') ||
+            modelName === 'gemini-flash-latest' ||
+            modelName === 'gemini-flash-lite-latest'
+          ? { thinkingBudget: 0 }
+          : undefined;
 
       const mergedConfig = {
         ...(params.config || {}),
@@ -170,20 +226,21 @@ async function generateContentWithModelFallback(
         GEMINI_TIMEOUT_MS,
         `Gemini generateContent (${modelName})`
       );
+      modelCooldownUntil.delete(modelName);
       return { response, modelUsed: modelName };
     } catch (err: any) {
       lastError = err;
       const msg = String(err?.message || err || '').toLowerCase();
-      // If API key itself is invalid, log and fail immediately without trying fallback models
+      // If API key itself is invalid, fail immediately without trying fallback models
       if (msg.includes('api_key_invalid') || msg.includes('api key not valid')) {
         logServerError('Gemini API key rejected', err, { modelName });
         break;
       }
+      recordModelFailureCooldown(modelName, err);
       if (i < candidateModels.length - 1) {
         console.info(
-          `[IQ Quiz Server] Model ${modelName} attempt ${i + 1} did not complete (${err?.message || 'error'}); falling back to ${candidateModels[i + 1]}`
+          `[IQ Quiz Server] Model ${modelName} attempt ${i + 1} unavailable; switching to ${candidateModels[i + 1]}`
         );
-        await sleep(200);
       } else {
         logServerError('All Gemini candidate models failed', err, {
           triedModels: candidateModels,
@@ -772,6 +829,37 @@ interface ServerQuizAttempt {
 }
 
 const serverAttempts = new Map<string, ServerQuizAttempt>();
+
+interface ServerChatMessage {
+  id: string;
+  role: 'user' | 'assistant';
+  content: string;
+  timestamp: string;
+  language?: 'en' | 'bn' | 'hi';
+  modelUsed?: string;
+}
+
+interface ServerChatConversation {
+  chatId: string;
+  userId: string;
+  title: string;
+  language: 'en' | 'bn' | 'hi';
+  messages: ServerChatMessage[];
+  createdAt: string;
+  updatedAt: string;
+}
+
+const serverUserChats = new Map<string, Map<string, ServerChatConversation>>();
+
+function getUserChatMap(userId: string): Map<string, ServerChatConversation> {
+  const cleanId = String(userId || 'local_student').trim().slice(0, 128) || 'local_student';
+  let map = serverUserChats.get(cleanId);
+  if (!map) {
+    map = new Map<string, ServerChatConversation>();
+    serverUserChats.set(cleanId, map);
+  }
+  return map;
+}
 
 function getTokenSecretKey(): Buffer {
   const secretSeed = getServerApiKey() || process.env.APP_URL || 'iq-quiz-stateless-token-key-v1';
@@ -2263,6 +2351,374 @@ Make explanations clear, student-friendly, and factually accurate.`,
         });
         return;
       }
+    }
+
+    // 11. AI Chat Feature — Fast Streaming & Standard Gemini AI Response (EN/BN/HI)
+    if (method === 'POST' && routePath === '/api/chat/message') {
+      const body = await readJsonBody(req);
+      const {
+        userId = 'local_student',
+        chatId = '',
+        message = '',
+        history = [],
+        replyLanguage = 'auto',
+        interfaceLanguage = 'en',
+        stream = false,
+      } = body || {};
+
+      const cleanUserId = String(userId || 'local_student').trim().slice(0, 128) || 'local_student';
+      const trimmedMessage = typeof message === 'string' ? message.trim() : '';
+
+      if (!trimmedMessage) {
+        sendJson(res, 400, {
+          error: 'Please enter a message before sending.',
+        });
+        return;
+      }
+
+      if (trimmedMessage.length > 8000) {
+        sendJson(res, 400, {
+          error: 'Your message is too long (maximum 8,000 characters). Please shorten it and try again.',
+        });
+        return;
+      }
+
+      const ai = getAiClient();
+      if (!ai) {
+        logServerError(
+          'Missing GEMINI_API_KEY in /api/chat/message',
+          new Error('GEMINI_API_KEY is not configured in server environment variables.')
+        );
+        sendJson(res, 503, {
+          error:
+            'Gemini AI API key is not configured on the server. Please add GEMINI_API_KEY in your Environment Variables and redeploy.',
+        });
+        return;
+      }
+
+      // Detect script of the user's message for natural multilingual responses
+      const hasBengaliChars = /[\u0980-\u09FF]/.test(trimmedMessage);
+      const hasHindiChars = /[\u0900-\u097F]/.test(trimmedMessage);
+      const detectedMsgLang: 'en' | 'bn' | 'hi' = hasBengaliChars
+        ? 'bn'
+        : hasHindiChars
+        ? 'hi'
+        : interfaceLanguage === 'bn' || interfaceLanguage === 'hi'
+        ? 'en'
+        : 'en';
+
+      const targetLang: 'en' | 'bn' | 'hi' =
+        replyLanguage === 'bn' || replyLanguage === 'hi' || replyLanguage === 'en'
+          ? replyLanguage
+          : detectedMsgLang;
+
+      const langRule =
+        replyLanguage === 'bn' || hasBengaliChars
+          ? 'Reply naturally in Bengali (বাংলা) unless asked for another language.'
+          : replyLanguage === 'hi' || hasHindiChars
+          ? 'Reply naturally in Hindi (हिन्दी) unless asked for another language.'
+          : 'Reply in the same language as the user message (English, Bengali, or Hindi).';
+
+      // Keep conversation context concise and relevant (last 8 messages, max 1200 chars each)
+      const safeHistory = Array.isArray(history) ? history.slice(-8) : [];
+      const contents: { role: 'user' | 'model'; parts: { text: string }[] }[] = [];
+
+      for (const item of safeHistory) {
+        if (!item || typeof item.content !== 'string' || !item.content.trim()) continue;
+        const role: 'user' | 'model' = item.role === 'assistant' ? 'model' : 'user';
+        const text = item.content.trim().slice(0, 1200);
+        if (contents.length === 0 && role === 'model') continue;
+        if (contents.length > 0 && contents[contents.length - 1].role === role) {
+          contents[contents.length - 1].parts[0].text += `\n\n${text}`;
+        } else {
+          contents.push({ role, parts: [{ text }] });
+        }
+      }
+
+      if (contents.length > 0 && contents[contents.length - 1].role === 'user') {
+        if (contents[contents.length - 1].parts[0].text !== trimmedMessage) {
+          contents[contents.length - 1].parts[0].text += `\n\n${trimmedMessage}`;
+        }
+      } else {
+        contents.push({ role: 'user', parts: [{ text: trimmedMessage }] });
+      }
+
+      // Concise system instruction for low-latency responses
+      const systemInstruction = `You are a fast, accurate, and natural AI assistant. Answer the user's exact question directly. Never add unsolicited introductions. ${langRule}`;
+
+      const resolvedChatId =
+        typeof chatId === 'string' && chatId.trim()
+          ? chatId.trim().replace(/[^a-zA-Z0-9_\-]/g, '_').slice(0, 100)
+          : `chat_${Date.now()}_${crypto.randomBytes(4).toString('hex')}`;
+
+      const persistChatTurn = (rawReply: string, modelUsed: string) => {
+        const nowIso = new Date().toISOString();
+        const userMsgObj: ServerChatMessage = {
+          id: `msg_u_${Date.now()}_${crypto.randomBytes(3).toString('hex')}`,
+          role: 'user',
+          content: trimmedMessage,
+          timestamp: nowIso,
+          language: detectedMsgLang,
+        };
+
+        const assistantMsgObj: ServerChatMessage = {
+          id: `msg_a_${Date.now()}_${crypto.randomBytes(3).toString('hex')}`,
+          role: 'assistant',
+          content: rawReply,
+          timestamp: new Date().toISOString(),
+          language: targetLang,
+          modelUsed,
+        };
+
+        const userChats = getUserChatMap(cleanUserId);
+        const existingConv = userChats.get(resolvedChatId);
+        const generatedTitle =
+          existingConv?.title ||
+          trimmedMessage.replace(/\s+/g, ' ').slice(0, 64) +
+            (trimmedMessage.length > 64 ? '…' : '');
+
+        const updatedMessages = existingConv
+          ? [...existingConv.messages, userMsgObj, assistantMsgObj].slice(-100)
+          : [
+              ...safeHistory
+                .filter((m: any) => m && typeof m.content === 'string' && m.content.trim())
+                .map((m: any, idx: number) => ({
+                  id: String(m.id || `msg_h_${idx}`),
+                  role: (m.role === 'assistant' ? 'assistant' : 'user') as 'user' | 'assistant',
+                  content: String(m.content).trim(),
+                  timestamp: String(m.timestamp || nowIso),
+                  language: (m.language === 'bn' || m.language === 'hi' ? m.language : 'en') as
+                    | 'en'
+                    | 'bn'
+                    | 'hi',
+                  modelUsed: m.modelUsed ? String(m.modelUsed) : undefined,
+                })),
+              userMsgObj,
+              assistantMsgObj,
+            ].slice(-100);
+
+        const updatedConv: ServerChatConversation = {
+          chatId: resolvedChatId,
+          userId: cleanUserId,
+          title: generatedTitle,
+          language: targetLang,
+          messages: updatedMessages,
+          createdAt: existingConv?.createdAt || nowIso,
+          updatedAt: assistantMsgObj.timestamp,
+        };
+
+        userChats.set(resolvedChatId, updatedConv);
+
+        return {
+          chatId: resolvedChatId,
+          title: generatedTitle,
+          userMessage: userMsgObj,
+          assistantMessage: assistantMsgObj,
+          modelUsed,
+        };
+      };
+
+      const wantStream =
+        Boolean(stream) || String(req.headers?.accept || '').includes('text/event-stream');
+
+      if (wantStream) {
+        let headersSent = false;
+        const ensureSseHeaders = () => {
+          if (headersSent) return;
+          headersSent = true;
+          res.statusCode = 200;
+          if (typeof res.setHeader === 'function') {
+            res.setHeader('Content-Type', 'text/event-stream; charset=utf-8');
+            res.setHeader('Cache-Control', 'no-cache, no-transform');
+            res.setHeader('Connection', 'keep-alive');
+            res.setHeader('X-Accel-Buffering', 'no');
+          }
+          if (typeof res.flushHeaders === 'function') {
+            res.flushHeaders();
+          }
+        };
+
+        const writeSse = (payload: Record<string, any>) => {
+          ensureSseHeaders();
+          const line = `data: ${JSON.stringify(payload)}\n\n`;
+          if (typeof res.write === 'function') {
+            res.write(line);
+          }
+          if (typeof (res as any).flush === 'function') {
+            (res as any).flush();
+          }
+        };
+
+        const chatModels = getOrderedCandidateModels();
+
+        let lastErr: any = null;
+
+        for (let i = 0; i < chatModels.length; i++) {
+          const modelName = chatModels[i];
+          try {
+            const thinkingConfig =
+              modelName === 'gemini-3-flash-preview' || modelName === 'gemini-3.8-flash'
+                ? { thinkingLevel: ThinkingLevel.LOW }
+                : modelName.startsWith('gemini-2.5') ||
+                  modelName === 'gemini-flash-latest' ||
+                  modelName === 'gemini-flash-lite-latest'
+                ? { thinkingBudget: 0 }
+                : undefined;
+
+            const streamResponse = await withTimeout(
+              ai.models.generateContentStream({
+                model: modelName,
+                contents,
+                config: {
+                  systemInstruction,
+                  temperature: 0.7,
+                  ...(thinkingConfig ? { thinkingConfig } : {}),
+                },
+              }),
+              15000,
+              `Gemini generateContentStream (${modelName})`
+            );
+
+            let accumulated = '';
+            for await (const chunk of streamResponse) {
+              const delta = typeof chunk?.text === 'string' ? chunk.text : '';
+              if (delta) {
+                accumulated += delta;
+                writeSse({ type: 'delta', text: delta });
+              }
+            }
+
+            const finalReply = accumulated.trim();
+            if (!finalReply) {
+              throw new Error('Gemini AI returned an empty stream.');
+            }
+
+            modelCooldownUntil.delete(modelName);
+            const savedPayload = persistChatTurn(finalReply, modelName);
+            writeSse({
+              type: 'done',
+              ...savedPayload,
+            });
+            if (typeof res.end === 'function') {
+              res.end();
+            }
+            return;
+          } catch (streamErr: any) {
+            lastErr = streamErr;
+            const msg = String(streamErr?.message || streamErr || '').toLowerCase();
+            recordModelFailureCooldown(modelName, streamErr);
+            // Only stop fallback loop if SSE chunks were already sent or if the API key itself is invalid
+            if (
+              headersSent ||
+              msg.includes('api_key_invalid') ||
+              msg.includes('api key not valid')
+            ) {
+              break;
+            }
+          }
+        }
+
+        logServerError('Gemini AI Chat stream failed in /api/chat/message', lastErr);
+        const errMsg = String(lastErr?.message || lastErr || '').toLowerCase();
+        const isInvalidKey =
+          errMsg.includes('api_key_invalid') || errMsg.includes('api key not valid');
+        const isRateLimit =
+          errMsg.includes('429') ||
+          errMsg.includes('resource_exhausted') ||
+          errMsg.includes('quota');
+
+        const clientErrorText = isInvalidKey
+          ? 'The configured GEMINI_API_KEY on the server was rejected as invalid. Please verify GEMINI_API_KEY in your Environment Variables and redeploy.'
+          : isRateLimit
+          ? 'Gemini AI rate limit reached. Please wait a few seconds and retry your message.'
+          : 'Unable to reach Gemini AI right now. Please check your connection or retry in a moment.';
+
+        if (!headersSent) {
+          sendJson(res, isRateLimit ? 429 : 503, { error: clientErrorText });
+        } else {
+          writeSse({ type: 'error', error: clientErrorText });
+          if (typeof res.end === 'function') {
+            res.end();
+          }
+        }
+        return;
+      }
+
+      try {
+        const { response, modelUsed } = await generateContentWithModelFallback(ai, {
+          contents,
+          config: {
+            systemInstruction,
+            temperature: 0.7,
+          },
+        });
+
+        const rawReply = typeof response?.text === 'string' ? response.text.trim() : '';
+        if (!rawReply) {
+          sendJson(res, 502, {
+            error: 'Gemini AI returned an empty response. Please try sending your message again.',
+          });
+          return;
+        }
+
+        const savedPayload = persistChatTurn(rawReply, modelUsed);
+        sendJson(res, 200, savedPayload);
+        return;
+      } catch (aiErr: any) {
+        logServerError('Gemini AI Chat failed in /api/chat/message', aiErr);
+        const msg = String(aiErr?.message || aiErr || '').toLowerCase();
+        if (msg.includes('api_key_invalid') || msg.includes('api key not valid')) {
+          sendJson(res, 503, {
+            error:
+              'The configured GEMINI_API_KEY on the server was rejected as invalid. Please verify GEMINI_API_KEY in your Environment Variables and redeploy.',
+          });
+          return;
+        }
+        if (msg.includes('429') || msg.includes('resource_exhausted') || msg.includes('quota')) {
+          sendJson(res, 429, {
+            error:
+              'Gemini AI rate limit reached. Please wait a few seconds and retry your message.',
+          });
+          return;
+        }
+        sendJson(res, 503, {
+          error:
+            'Unable to reach Gemini AI right now. Please check your connection or retry in a moment.',
+        });
+        return;
+      }
+    }
+
+    // 12. AI Chat History — Fetch Per-User Private Conversations from Server Store
+    if (method === 'POST' && routePath === '/api/chat/history') {
+      const body = await readJsonBody(req);
+      const cleanUserId =
+        String(body?.userId || 'local_student').trim().slice(0, 128) || 'local_student';
+      const userChats = getUserChatMap(cleanUserId);
+      const list = Array.from(userChats.values()).sort((a, b) =>
+        b.updatedAt.localeCompare(a.updatedAt)
+      );
+      sendJson(res, 200, {
+        userId: cleanUserId,
+        conversations: list,
+      });
+      return;
+    }
+
+    // 13. AI Chat Delete / Clear History (Per-User Isolated)
+    if (method === 'POST' && routePath === '/api/chat/delete') {
+      const body = await readJsonBody(req);
+      const cleanUserId =
+        String(body?.userId || 'local_student').trim().slice(0, 128) || 'local_student';
+      const { chatId, clearAll } = body || {};
+      const userChats = getUserChatMap(cleanUserId);
+      if (clearAll) {
+        userChats.clear();
+      } else if (typeof chatId === 'string' && chatId.trim()) {
+        userChats.delete(chatId.trim());
+      }
+      sendJson(res, 200, { deleted: true });
+      return;
     }
 
     sendJson(res, 404, {

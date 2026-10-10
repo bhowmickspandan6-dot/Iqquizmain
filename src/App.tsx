@@ -23,8 +23,10 @@ import {
   ArrowRight,
   RefreshCw,
   Shuffle,
+  MessageSquare,
 } from 'lucide-react';
 import {
+  ChatConversation,
   ClassLevel,
   DifficultyLevel,
   LanguageCode,
@@ -49,6 +51,7 @@ import { LANGUAGE_LABELS, t } from './i18n/translations';
 import { ActiveQuizView } from './components/ActiveQuizView';
 import { ResultsView } from './components/ResultsView';
 import { StudyNotesView } from './components/StudyNotesView';
+import { AiChatView } from './components/AiChatView';
 import {
   QuizLanguageModal,
   PendingQuizLaunch,
@@ -65,6 +68,10 @@ import {
   deleteStudyNoteFromFirestore,
   saveQuestionHistoryBatchToFirestore,
   loadUserQuestionHistoryFromFirestore,
+  saveChatConversationToFirestore,
+  loadUserChatsFromFirestore,
+  deleteChatConversationFromFirestore,
+  clearUserChatsFromFirestore,
   User,
 } from './firebase';
 import {
@@ -80,6 +87,7 @@ const STORAGE_KEYS = {
   QUESTION_HISTORY: 'iqquiz_question_history_v2',
   CLIENT_UID: 'iqquiz_client_uid_v1',
   NOTES: 'eduquiz_notes_v1',
+  CHATS_PREFIX: 'iqquiz_chats_v1_',
 };
 
 interface PendingLaunchInternal extends PendingQuizLaunch {
@@ -203,6 +211,146 @@ export default function App() {
   const [settingsSavedBanner, setSettingsSavedBanner] = useState(false);
 
   const effectiveUserId = currentUser?.uid || clientUid;
+  const userChatStorageKey = `${STORAGE_KEYS.CHATS_PREFIX}${effectiveUserId}`;
+
+  // Per-User Isolated AI Chat Conversations & Active Chat State
+  const [chatConversations, setChatConversations] = useState<ChatConversation[]>(() => {
+    try {
+      const raw = localStorage.getItem(`${STORAGE_KEYS.CHATS_PREFIX}${clientUid}`);
+      const parsed = raw ? JSON.parse(raw) : [];
+      return Array.isArray(parsed) ? parsed : [];
+    } catch {
+      return [];
+    }
+  });
+  const [activeChatId, setActiveChatId] = useState<string | null>(null);
+
+  // Load the current user's isolated chat history whenever effectiveUserId changes
+  useEffect(() => {
+    try {
+      const raw = localStorage.getItem(userChatStorageKey);
+      const localList: ChatConversation[] = raw ? JSON.parse(raw) : [];
+      const validList = Array.isArray(localList)
+        ? localList.filter((c) => c && c.chatId && (!c.userId || c.userId === effectiveUserId))
+        : [];
+      setChatConversations(validList);
+      setActiveChatId(validList.length > 0 ? validList[0].chatId : null);
+    } catch {
+      setChatConversations([]);
+      setActiveChatId(null);
+    }
+
+    // Also fetch any server-side session chats for this userId
+    safeFetchJson<{ userId: string; conversations: ChatConversation[] }>('/api/chat/history', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ userId: effectiveUserId }),
+    })
+      .then((res) => {
+        if (Array.isArray(res?.conversations) && res.conversations.length > 0) {
+          setChatConversations((prev) => {
+            const map = new Map<string, ChatConversation>();
+            for (const c of prev) {
+              if (c && c.chatId) map.set(c.chatId, c);
+            }
+            for (const s of res.conversations) {
+              if (s && s.chatId && s.userId === effectiveUserId) {
+                const existing = map.get(s.chatId);
+                if (!existing || (s.messages?.length || 0) >= (existing.messages?.length || 0)) {
+                  map.set(s.chatId, s);
+                }
+              }
+            }
+            const merged = Array.from(map.values()).sort((a, b) =>
+              String(b.updatedAt || '').localeCompare(String(a.updatedAt || ''))
+            );
+            try {
+              localStorage.setItem(userChatStorageKey, JSON.stringify(merged));
+            } catch {
+              // ignore storage quota
+            }
+            return merged;
+          });
+        }
+      })
+      .catch(() => {});
+  }, [effectiveUserId, userChatStorageKey]);
+
+  // Persist user's private chat conversations to their user-scoped storage key
+  useEffect(() => {
+    try {
+      localStorage.setItem(userChatStorageKey, JSON.stringify(chatConversations));
+    } catch {
+      // ignore storage quota
+    }
+  }, [chatConversations, userChatStorageKey]);
+
+  const handleCreateNewChat = (): string => {
+    const newId = `chat_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+    setActiveChatId(newId);
+    return newId;
+  };
+
+  const handleUpsertChatConversation = (conv: ChatConversation, syncCloud = true) => {
+    const taggedConv: ChatConversation = {
+      ...conv,
+      userId: effectiveUserId,
+    };
+    setChatConversations((prev) => {
+      const idx = prev.findIndex((c) => c.chatId === taggedConv.chatId);
+      let next: ChatConversation[];
+      if (idx === -1) {
+        next = [taggedConv, ...prev];
+      } else {
+        next = [...prev];
+        next[idx] = taggedConv;
+      }
+      return next.sort((a, b) =>
+        String(b.updatedAt || '').localeCompare(String(a.updatedAt || ''))
+      );
+    });
+    setActiveChatId(taggedConv.chatId);
+
+    if (syncCloud && currentUser) {
+      saveChatConversationToFirestore(currentUser, taggedConv).catch(() => {});
+    }
+  };
+
+  const handleDeleteChatConversation = (chatIdToDelete: string) => {
+    setChatConversations((prev) => {
+      const remaining = prev.filter((c) => c.chatId !== chatIdToDelete);
+      if (activeChatId === chatIdToDelete) {
+        setActiveChatId(remaining.length > 0 ? remaining[0].chatId : null);
+      }
+      return remaining;
+    });
+    fetch('/api/chat/delete', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ userId: effectiveUserId, chatId: chatIdToDelete }),
+    }).catch(() => {});
+    if (currentUser) {
+      deleteChatConversationFromFirestore(currentUser, chatIdToDelete).catch(() => {});
+    }
+  };
+
+  const handleClearAllChatConversations = () => {
+    setChatConversations([]);
+    setActiveChatId(null);
+    try {
+      localStorage.removeItem(userChatStorageKey);
+    } catch {
+      // ignore
+    }
+    fetch('/api/chat/delete', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ userId: effectiveUserId, clearAll: true }),
+    }).catch(() => {});
+    if (currentUser) {
+      clearUserChatsFromFirestore(currentUser).catch(() => {});
+    }
+  };
 
   // Backfill questionHistory from any existing attemptsHistory on mount so all past questions are tracked
   useEffect(() => {
@@ -307,6 +455,25 @@ export default function App() {
                 new Set([...prev, ...remoteHistory.map((r) => r.fingerprint).filter(Boolean)])
               )
             );
+          }
+
+          const remoteChats = await loadUserChatsFromFirestore(user);
+          if (remoteChats.length > 0) {
+            setChatConversations((prev) => {
+              const map = new Map<string, ChatConversation>();
+              for (const c of remoteChats) {
+                if (c && c.chatId) map.set(c.chatId, c);
+              }
+              for (const l of prev) {
+                if (l && l.chatId && l.userId === user.uid && !map.has(l.chatId)) {
+                  map.set(l.chatId, l);
+                }
+              }
+              const merged = Array.from(map.values()).sort((a, b) =>
+                String(b.updatedAt || '').localeCompare(String(a.updatedAt || ''))
+              );
+              return merged;
+            });
           }
         } catch (err) {
           console.error('Profile/history sync warning:', err);
@@ -855,6 +1022,11 @@ export default function App() {
       id: 'dashboard',
       label: t(interfaceLanguage, 'navDashboard'),
       icon: <LayoutDashboard className="w-4 h-4" />,
+    },
+    {
+      id: 'ai_chat',
+      label: t(interfaceLanguage, 'navAiChat'),
+      icon: <MessageSquare className="w-4 h-4" />,
     },
     {
       id: 'take_quiz',
@@ -1782,6 +1954,33 @@ export default function App() {
                   )}
                 </div>
               </div>
+              </motion.div>
+            )}
+
+            {/* =========================================================
+                VIEW 1B: AI CHAT (ChatGPT-Style Multilingual Assistant)
+               ========================================================= */}
+            {activeNav === 'ai_chat' && (
+              <motion.div
+                key="view-ai-chat"
+                initial={{ opacity: 0, y: 10, scale: 0.995 }}
+                animate={{ opacity: 1, y: 0, scale: 1 }}
+                exit={{ opacity: 0, y: -8, scale: 0.995 }}
+                transition={{ duration: 0.2, ease: [0.22, 1, 0.36, 1] }}
+              >
+                <AiChatView
+                  interfaceLanguage={interfaceLanguage}
+                  selectedClass={selectedClass}
+                  userId={effectiveUserId}
+                  isCloudSynced={Boolean(currentUser)}
+                  conversations={chatConversations}
+                  activeChatId={activeChatId}
+                  onSelectChat={(id) => setActiveChatId(id)}
+                  onNewChat={handleCreateNewChat}
+                  onUpsertConversation={handleUpsertChatConversation}
+                  onDeleteConversation={handleDeleteChatConversation}
+                  onClearAllConversations={handleClearAllChatConversations}
+                />
               </motion.div>
             )}
 
