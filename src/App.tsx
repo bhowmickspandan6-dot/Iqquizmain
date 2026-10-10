@@ -1356,6 +1356,16 @@ export default function App() {
               )}
             </div>
           </div>
+
+          {/* Sidebar Attribution Footer */}
+          <div className="mt-auto px-4 pt-1 pb-3.5 text-center shrink-0 select-none">
+            <p className="text-[9.5px] leading-[13px] font-medium text-[#8E92B2] tracking-wide">
+              Hosted by Knight Team
+            </p>
+            <p className="text-[9.5px] leading-[13px] font-medium text-[#8E92B2] tracking-wide">
+              Owner- ~Spandan~
+            </p>
+          </div>
         </aside>
 
         {/* Mobile Drawer Overlay with Smooth Opening & Closing Animation */}
@@ -1379,7 +1389,7 @@ export default function App() {
                 transition={{ duration: 0.24, ease: [0.22, 1, 0.36, 1] }}
                 className="relative w-64 max-w-xs bg-[#0F172A] text-white h-full flex flex-col z-10 shadow-2xl"
               >
-                <div className="px-5 py-4 border-b border-slate-800 flex items-center justify-between">
+                <div className="px-5 py-4 border-b border-slate-800 flex items-center justify-between shrink-0">
                   <div className="flex items-center gap-2.5">
                     <span className="w-7 h-7 rounded-md bg-indigo-600 flex items-center justify-center text-white font-extrabold text-xs tracking-tight shrink-0">
                       IQ
@@ -1397,7 +1407,7 @@ export default function App() {
                     <X className="w-5 h-5" />
                   </button>
                 </div>
-                <nav className="flex-1 px-3 py-4 space-y-1">
+                <nav className="flex-1 min-h-0 overflow-y-auto px-3 py-4 space-y-1">
                   {navItems.map((item, idx) => (
                     <motion.button
                       key={item.id}
@@ -1420,6 +1430,16 @@ export default function App() {
                     </motion.button>
                   ))}
                 </nav>
+
+                {/* Mobile Sidebar Bottom Attribution Footer */}
+                <div className="mt-auto px-4 pt-2 pb-3.5 text-center shrink-0 select-none">
+                  <p className="text-[9.5px] leading-[13px] font-medium text-[#8E92B2] tracking-wide">
+                    Hosted by Knight Team
+                  </p>
+                  <p className="text-[9.5px] leading-[13px] font-medium text-[#8E92B2] tracking-wide">
+                    Owner- ~Spandan~
+                  </p>
+                </div>
               </motion.div>
             </div>
           )}
