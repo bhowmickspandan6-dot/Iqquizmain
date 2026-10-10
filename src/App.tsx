@@ -896,9 +896,83 @@ export default function App() {
       : `IQ Quiz — ${t(interfaceLanguage, 'tagline')}`;
   }, [activeNav, interfaceLanguage]);
 
+  // Global protection against text selection, copying, and Android/mobile long-press text-selection popups
+  // while keeping inputs, textareas, dropdowns, buttons, scrolling, and accessibility fully functional
+  useEffect(() => {
+    const isEditableFormTarget = (node: EventTarget | Node | null): boolean => {
+      if (!node) return false;
+      const el =
+        node instanceof Element
+          ? node
+          : (node as Node).parentElement;
+      if (!el) return false;
+      return Boolean(
+        el.closest(
+          'input, textarea, select, option, [contenteditable="true"], [contenteditable="plaintext-only"], [data-allow-select="true"]'
+        )
+      );
+    };
+
+    const handleSelectStart = (e: Event) => {
+      if (!isEditableFormTarget(e.target)) {
+        e.preventDefault();
+      }
+    };
+
+    const handleContextMenu = (e: MouseEvent) => {
+      if (!isEditableFormTarget(e.target)) {
+        e.preventDefault();
+      }
+    };
+
+    const handleCopyOrCut = (e: ClipboardEvent) => {
+      if (
+        !isEditableFormTarget(e.target) &&
+        !isEditableFormTarget(document.activeElement)
+      ) {
+        e.preventDefault();
+      }
+    };
+
+    const handleDragStart = (e: DragEvent) => {
+      if (!isEditableFormTarget(e.target)) {
+        e.preventDefault();
+      }
+    };
+
+    const handleSelectionChange = () => {
+      if (isEditableFormTarget(document.activeElement)) return;
+      const selection = window.getSelection?.();
+      if (selection && selection.rangeCount > 0 && !selection.isCollapsed) {
+        if (
+          !isEditableFormTarget(selection.anchorNode) &&
+          !isEditableFormTarget(selection.focusNode)
+        ) {
+          selection.removeAllRanges();
+        }
+      }
+    };
+
+    document.addEventListener('selectstart', handleSelectStart);
+    document.addEventListener('contextmenu', handleContextMenu);
+    document.addEventListener('copy', handleCopyOrCut);
+    document.addEventListener('cut', handleCopyOrCut);
+    document.addEventListener('dragstart', handleDragStart);
+    document.addEventListener('selectionchange', handleSelectionChange);
+
+    return () => {
+      document.removeEventListener('selectstart', handleSelectStart);
+      document.removeEventListener('contextmenu', handleContextMenu);
+      document.removeEventListener('copy', handleCopyOrCut);
+      document.removeEventListener('cut', handleCopyOrCut);
+      document.removeEventListener('dragstart', handleDragStart);
+      document.removeEventListener('selectionchange', handleSelectionChange);
+    };
+  }, []);
+
   return (
     <MotionConfig reducedMotion="user">
-      <div className="min-h-screen flex bg-[#F8FAFC] text-slate-900">
+      <div className="min-h-screen flex bg-[#F8FAFC] text-slate-900 select-none">
         {/* Mandatory Pre-Quiz Language Selection Modal */}
         <QuizLanguageModal
           pendingLaunch={pendingLaunch}
