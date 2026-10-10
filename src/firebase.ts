@@ -22,7 +22,14 @@ import {
   serverTimestamp
 } from 'firebase/firestore';
 import firebaseConfig from '../firebase-applet-config.json';
-import { ClassLevel, LanguageCode, QuizAttemptState, SavedStudyNote } from './types';
+import {
+  ClassLevel,
+  LanguageCode,
+  QuestionHistoryRecord,
+  QuizAttemptState,
+  SavedStudyNote,
+  SubjectId,
+} from './types';
 
 const app = initializeApp(firebaseConfig);
 export const db = getFirestore(app, firebaseConfig.firestoreDatabaseId);
@@ -313,3 +320,97 @@ export async function listUserQuizAttemptsFromFirestore(user: User): Promise<any
     handleFirestoreError(error, OperationType.LIST, path);
   }
 }
+
+export async function saveQuestionHistoryBatchToFirestore(
+  user: User,
+  records: QuestionHistoryRecord[]
+): Promise<void> {
+  if (!user.emailVerified || !Array.isArray(records) || records.length === 0) return;
+  const uid = sanitizeId(user.uid);
+
+  for (const rec of records) {
+    const historyId = sanitizeId(`${uid}_${rec.fingerprint}`);
+    const path = `questionHistory/${historyId}`;
+    const ref = doc(db, 'questionHistory', historyId);
+    try {
+      const existingSnap = await getDoc(ref);
+      if (!existingSnap.exists()) {
+        await setDoc(ref, {
+          historyId,
+          userId: uid,
+          classLevel: rec.classLevel,
+          subject: rec.subject,
+          topic: clampString(rec.topic, 1, 160, 'General'),
+          difficulty:
+            rec.difficulty === 'easy' ||
+            rec.difficulty === 'medium' ||
+            rec.difficulty === 'hard' ||
+            rec.difficulty === 'mixed'
+              ? rec.difficulty
+              : 'mixed',
+          language: rec.language,
+          fingerprint: clampString(rec.fingerprint, 6, 64, 'fp_default'),
+          structuralHash: clampString(
+            rec.structuralHash || rec.fingerprint,
+            6,
+            64,
+            'sh_default'
+          ),
+          conceptKey: clampString(rec.conceptKey, 2, 120, 'concept_general'),
+          questionText: clampString(rec.questionText, 3, 2000, 'Question text'),
+          createdAt: serverTimestamp(),
+        });
+      }
+    } catch (error) {
+      // Log and continue so one record error does not block the quiz flow
+      console.warn('Could not persist question history item:', path, error);
+    }
+  }
+}
+
+export async function loadUserQuestionHistoryFromFirestore(
+  user: User
+): Promise<QuestionHistoryRecord[]> {
+  if (!user.emailVerified) return [];
+  const uid = sanitizeId(user.uid);
+  const path = 'questionHistory';
+  try {
+    const q = query(collection(db, 'questionHistory'), where('userId', '==', uid));
+    const snap = await getDocs(q);
+    return snap.docs.map((d) => {
+      const data = d.data();
+      return {
+        historyId: String(data.historyId || d.id),
+        userId: String(data.userId || uid),
+        classLevel: (Number(data.classLevel) as ClassLevel) || 8,
+        subject: (data.subject as SubjectId) || 'mathematics',
+        topic: String(data.topic || 'General'),
+        difficulty: String(data.difficulty || 'mixed'),
+        language: (data.language as LanguageCode) || 'en',
+        fingerprint: String(data.fingerprint || ''),
+        structuralHash: String(data.structuralHash || data.fingerprint || ''),
+        conceptKey: String(data.conceptKey || ''),
+        questionText: String(data.questionText || ''),
+        createdAt: new Date().toISOString(),
+      };
+    });
+  } catch (error) {
+    console.warn('Could not load question history from Firestore:', path, error);
+    return [];
+  }
+}
+
+export async function clearUserQuestionHistoryFromFirestore(user: User): Promise<void> {
+  if (!user.emailVerified) return;
+  const uid = sanitizeId(user.uid);
+  try {
+    const q = query(collection(db, 'questionHistory'), where('userId', '==', uid));
+    const snap = await getDocs(q);
+    for (const d of snap.docs) {
+      await deleteDoc(doc(db, 'questionHistory', d.id));
+    }
+  } catch (error) {
+    console.warn('Could not clear question history from Firestore:', error);
+  }
+}
+

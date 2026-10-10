@@ -29,6 +29,7 @@ import {
   DifficultyLevel,
   LanguageCode,
   NavSection,
+  QuestionHistoryRecord,
   QuestionTypeFilter,
   QuizAttemptState,
   QuizConfig,
@@ -62,6 +63,8 @@ import {
   saveQuizAttemptToFirestore,
   saveStudyNoteToFirestore,
   deleteStudyNoteFromFirestore,
+  saveQuestionHistoryBatchToFirestore,
+  loadUserQuestionHistoryFromFirestore,
   User,
 } from './firebase';
 import {
@@ -74,6 +77,8 @@ const STORAGE_KEYS = {
   ATTEMPTS: 'eduquiz_attempts_v1',
   ACTIVE_ATTEMPT_ID: 'eduquiz_active_attempt_id_v1',
   FINGERPRINTS: 'eduquiz_fingerprints_v1',
+  QUESTION_HISTORY: 'iqquiz_question_history_v2',
+  CLIENT_UID: 'iqquiz_client_uid_v1',
   NOTES: 'eduquiz_notes_v1',
 };
 
@@ -160,6 +165,28 @@ export default function App() {
     }
   });
 
+  const [questionHistory, setQuestionHistory] = useState<QuestionHistoryRecord[]>(() => {
+    try {
+      const raw = localStorage.getItem(STORAGE_KEYS.QUESTION_HISTORY);
+      const parsed: QuestionHistoryRecord[] = raw ? JSON.parse(raw) : [];
+      return Array.isArray(parsed) ? parsed : [];
+    } catch {
+      return [];
+    }
+  });
+
+  const [clientUid] = useState<string>(() => {
+    try {
+      const existing = localStorage.getItem(STORAGE_KEYS.CLIENT_UID);
+      if (existing && existing.trim()) return existing.trim();
+      const generated = `usr_${Date.now()}_${Math.random().toString(36).slice(2, 10)}`;
+      localStorage.setItem(STORAGE_KEYS.CLIENT_UID, generated);
+      return generated;
+    } catch {
+      return 'local_student';
+    }
+  });
+
   const [savedNotes, setSavedNotes] = useState<SavedStudyNote[]>(() => {
     try {
       const raw = localStorage.getItem(STORAGE_KEYS.NOTES);
@@ -175,7 +202,42 @@ export default function App() {
   const [quizGenError, setQuizGenError] = useState<string | null>(null);
   const [settingsSavedBanner, setSettingsSavedBanner] = useState(false);
 
-  const effectiveUserId = currentUser?.uid || 'local_student';
+  const effectiveUserId = currentUser?.uid || clientUid;
+
+  // Backfill questionHistory from any existing attemptsHistory on mount so all past questions are tracked
+  useEffect(() => {
+    if (attemptsHistory.length === 0) return;
+    setQuestionHistory((prev) => {
+      const map = new Map<string, QuestionHistoryRecord>();
+      for (const item of prev) {
+        if (item && item.fingerprint) map.set(item.fingerprint, item);
+      }
+      let added = false;
+      for (const att of attemptsHistory) {
+        for (const q of att.questions || []) {
+          if (q && q.fingerprint && !map.has(q.fingerprint)) {
+            added = true;
+            map.set(q.fingerprint, {
+              historyId: `${effectiveUserId}_${q.fingerprint}`,
+              userId: effectiveUserId,
+              classLevel: att.config.classLevel,
+              subject: att.config.subject,
+              topic: q.topic || att.config.topic || 'General',
+              difficulty: q.difficulty || att.config.difficulty || 'mixed',
+              language: att.config.quizLanguage,
+              fingerprint: q.fingerprint,
+              structuralHash: q.structuralHash || q.fingerprint,
+              conceptKey: q.conceptKey || 'concept_general',
+              questionText: q.questionText,
+              options: q.options,
+              createdAt: att.startedAt || new Date().toISOString(),
+            });
+          }
+        }
+      }
+      return added ? Array.from(map.values()) : prev;
+    });
+  }, [attemptsHistory, effectiveUserId]);
 
   // Persist Preferences locally & sync to Firestore when signed in
   useEffect(() => {
@@ -190,7 +252,7 @@ export default function App() {
     }
   }, [selectedClass, interfaceLanguage, quizLanguage, currentUser]);
 
-  // Persist Attempts, Fingerprints, and Notes locally
+  // Persist Attempts, Fingerprints, QuestionHistory, and Notes locally
   useEffect(() => {
     localStorage.setItem(STORAGE_KEYS.ATTEMPTS, JSON.stringify(attemptsHistory));
   }, [attemptsHistory]);
@@ -200,10 +262,14 @@ export default function App() {
   }, [seenFingerprints]);
 
   useEffect(() => {
+    localStorage.setItem(STORAGE_KEYS.QUESTION_HISTORY, JSON.stringify(questionHistory));
+  }, [questionHistory]);
+
+  useEffect(() => {
     localStorage.setItem(STORAGE_KEYS.NOTES, JSON.stringify(savedNotes));
   }, [savedNotes]);
 
-  // Firebase Auth listener
+  // Firebase Auth listener — syncs profile AND persistent questionHistory from Firestore
   useEffect(() => {
     const unsub = onAuthStateChanged(auth, async (user) => {
       setCurrentUser(user);
@@ -221,8 +287,29 @@ export default function App() {
               quizLanguage,
             });
           }
+
+          const remoteHistory = await loadUserQuestionHistoryFromFirestore(user);
+          if (remoteHistory.length > 0) {
+            setQuestionHistory((prev) => {
+              const map = new Map<string, QuestionHistoryRecord>();
+              for (const r of remoteHistory) {
+                if (r.fingerprint) map.set(r.fingerprint, r);
+              }
+              for (const l of prev) {
+                if (l.fingerprint && !map.has(l.fingerprint)) {
+                  map.set(l.fingerprint, l);
+                }
+              }
+              return Array.from(map.values());
+            });
+            setSeenFingerprints((prev) =>
+              Array.from(
+                new Set([...prev, ...remoteHistory.map((r) => r.fingerprint).filter(Boolean)])
+              )
+            );
+          }
         } catch (err) {
-          console.error('Profile sync warning:', err);
+          console.error('Profile/history sync warning:', err);
         }
       }
     });
@@ -272,7 +359,7 @@ export default function App() {
     }
   }, [currentCurriculum, selectedTopic]);
 
-  // Update helper for attemptsHistory
+  // Update helper for attemptsHistory & persistent questionHistory
   const upsertAttemptInHistory = (updated: QuizAttemptState) => {
     setActiveAttempt(updated);
     if (updated.status === 'in_progress') {
@@ -289,13 +376,106 @@ export default function App() {
       return copy;
     });
 
-    // Track unique question fingerprints
-    const newFps = updated.questions.map((q) => q.fingerprint).filter(Boolean);
+    // Build QuestionHistoryRecord entries for every question in this attempt
+    const newRecords: QuestionHistoryRecord[] = (updated.questions || [])
+      .filter((q) => q && q.fingerprint && q.questionText)
+      .map((q) => ({
+        historyId: `${effectiveUserId}_${q.fingerprint}`,
+        userId: effectiveUserId,
+        classLevel: updated.config.classLevel,
+        subject: updated.config.subject,
+        topic: q.topic || updated.config.topic || 'General',
+        difficulty: q.difficulty || updated.config.difficulty || 'mixed',
+        language: updated.config.quizLanguage,
+        fingerprint: q.fingerprint,
+        structuralHash: q.structuralHash || q.fingerprint,
+        conceptKey: q.conceptKey || 'concept_general',
+        questionText: q.questionText,
+        options: q.options,
+        createdAt: updated.startedAt || new Date().toISOString(),
+      }));
+
+    const newFps = newRecords.map((r) => r.fingerprint);
     setSeenFingerprints((prev) => Array.from(new Set([...prev, ...newFps])));
+
+    setQuestionHistory((prev) => {
+      const map = new Map<string, QuestionHistoryRecord>();
+      for (const item of prev) {
+        if (item && item.fingerprint) map.set(item.fingerprint, item);
+      }
+      for (const rec of newRecords) {
+        map.set(rec.fingerprint, rec);
+      }
+      return Array.from(map.values());
+    });
 
     if (currentUser) {
       saveQuizAttemptToFirestore(currentUser, updated).catch(() => {});
+      saveQuestionHistoryBatchToFirestore(currentUser, newRecords).catch(() => {});
     }
+  };
+
+  // Builds a prioritized exclusion history payload for a specific (classLevel, subject, topic, difficulty)
+  const buildExcludedHistoryPayload = (
+    targetClass: ClassLevel,
+    targetSubject: SubjectId,
+    targetTopic?: string
+  ) => {
+    const map = new Map<string, QuestionHistoryRecord>();
+    for (const item of questionHistory) {
+      if (
+        item &&
+        item.fingerprint &&
+        item.classLevel === targetClass &&
+        item.subject === targetSubject
+      ) {
+        map.set(item.fingerprint, item);
+      }
+    }
+    for (const att of attemptsHistory) {
+      if (att.config.classLevel === targetClass && att.config.subject === targetSubject) {
+        for (const q of att.questions || []) {
+          if (q && q.fingerprint && !map.has(q.fingerprint)) {
+            map.set(q.fingerprint, {
+              historyId: `${effectiveUserId}_${q.fingerprint}`,
+              userId: effectiveUserId,
+              classLevel: att.config.classLevel,
+              subject: att.config.subject,
+              topic: q.topic || att.config.topic || 'General',
+              difficulty: q.difficulty || att.config.difficulty || 'mixed',
+              language: att.config.quizLanguage,
+              fingerprint: q.fingerprint,
+              structuralHash: q.structuralHash || q.fingerprint,
+              conceptKey: q.conceptKey || 'concept_general',
+              questionText: q.questionText,
+              options: q.options,
+              createdAt: att.startedAt || new Date().toISOString(),
+            });
+          }
+        }
+      }
+    }
+
+    const allMatching = Array.from(map.values());
+    // Prioritize same topic first, then most recent up to 60 items for optimal token efficiency
+    const sorted = allMatching.sort((a, b) => {
+      const aTopicMatch = targetTopic && a.topic === targetTopic ? 1 : 0;
+      const bTopicMatch = targetTopic && b.topic === targetTopic ? 1 : 0;
+      if (aTopicMatch !== bTopicMatch) return bTopicMatch - aTopicMatch;
+      return (b.createdAt || '').localeCompare(a.createdAt || '');
+    });
+
+    return sorted.slice(0, 60).map((item) => ({
+      fingerprint: item.fingerprint,
+      structuralHash: item.structuralHash,
+      conceptKey: item.conceptKey,
+      questionText: item.questionText,
+      options: item.options,
+      classLevel: item.classLevel,
+      subject: item.subject,
+      topic: item.topic,
+      difficulty: item.difficulty,
+    }));
   };
 
   // MANDATORY PRE-QUIZ LANGUAGE GATE:
@@ -356,6 +536,18 @@ export default function App() {
     setGeneratingQuiz(true);
 
     try {
+      const excludedHistoryForTarget = buildExcludedHistoryPayload(
+        pendingLaunch.classLevel,
+        pendingLaunch.subject,
+        pendingLaunch.topic
+      );
+      const allFingerprints = Array.from(
+        new Set([
+          ...seenFingerprints,
+          ...questionHistory.map((h) => h.fingerprint).filter(Boolean),
+        ])
+      );
+
       if (pendingLaunch.kind === 'retake' && pendingLaunch.originalAttemptId) {
         const origAttempt =
           attemptsHistory.find((a) => a.attemptId === pendingLaunch.originalAttemptId) ||
@@ -366,11 +558,23 @@ export default function App() {
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({
             originalAttemptId: pendingLaunch.originalAttemptId,
-            originalConfig: origAttempt?.config,
-            originalQuestions: origAttempt?.questions,
+            originalConfig: origAttempt?.config || {
+              classLevel: pendingLaunch.classLevel,
+              subject: pendingLaunch.subject,
+              quizLanguage: confirmedQuizLanguage,
+              topic: pendingLaunch.topic,
+              difficulty: pendingLaunch.difficulty,
+              questionCount: pendingLaunch.questionCount,
+              questionType: pendingLaunch.questionType,
+              durationMinutes: pendingLaunch.durationMinutes,
+              mode: pendingLaunch.mode,
+            },
+            originalQuestions: origAttempt?.questions || [],
             serverStateToken: origAttempt?.serverStateToken,
             quizLanguage: confirmedQuizLanguage,
             userId: effectiveUserId,
+            clientExcludedFingerprints: allFingerprints,
+            clientExcludedHistory: excludedHistoryForTarget,
           }),
         });
         const validated = validateQuizAttemptPayload(rawData);
@@ -420,7 +624,8 @@ export default function App() {
           durationMinutes: pendingLaunch.durationMinutes,
           mode: pendingLaunch.mode,
           userId: effectiveUserId,
-          clientExcludedFingerprints: seenFingerprints,
+          clientExcludedFingerprints: allFingerprints,
+          clientExcludedHistory: excludedHistoryForTarget,
         }),
       });
       const validated = validateQuizAttemptPayload(rawData);

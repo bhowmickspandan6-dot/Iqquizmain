@@ -1,15 +1,20 @@
 import crypto from 'crypto';
-import { GoogleGenAI, Type } from '@google/genai';
+import { GoogleGenAI, ThinkingLevel, Type } from '@google/genai';
 
 // Official supported Gemini Flash models (fast, free-tier eligible, structured JSON output supported)
-const SUPPORTED_GEMINI_MODELS = ['gemini-2.5-flash', 'gemini-3-flash-preview'];
+const SUPPORTED_GEMINI_MODELS = [
+  'gemini-3-flash-preview',
+  'gemini-flash-latest',
+  'gemini-3.8-flash',
+];
 const configuredModel = (process.env.GEMINI_MODEL || '').trim();
 const ACTIVE_GEMINI_MODEL = SUPPORTED_GEMINI_MODELS.includes(configuredModel)
   ? configuredModel
-  : 'gemini-2.5-flash';
+  : 'gemini-3-flash-preview';
 
-// Timeout per Gemini call so Vercel Serverless Functions never hit gateway 504/500 timeouts
-const GEMINI_TIMEOUT_MS = 8000;
+// Per-call timeout and bounded replacement passes so serverless functions never hang or loop infinitely
+const GEMINI_TIMEOUT_MS = 15000;
+const MAX_GENERATION_PASSES = 3;
 
 export const config = {
   maxDuration: 30,
@@ -53,7 +58,14 @@ function getAiClient(): GoogleGenAI | null {
     return null;
   }
   try {
-    return new GoogleGenAI({ apiKey });
+    return new GoogleGenAI({
+      apiKey,
+      httpOptions: {
+        headers: {
+          'User-Agent': 'aistudio-build',
+        },
+      },
+    });
   } catch (err) {
     logServerError('getAiClient initialization failed', err);
     return null;
@@ -77,6 +89,10 @@ function withTimeout<T>(promise: Promise<T>, ms: number, label: string): Promise
   });
 }
 
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
 async function generateContentWithModelFallback(
   ai: GoogleGenAI,
   params: {
@@ -89,13 +105,26 @@ async function generateContentWithModelFallback(
   );
   let lastError: any = null;
 
-  for (const modelName of candidateModels) {
+  for (let i = 0; i < candidateModels.length; i++) {
+    const modelName = candidateModels[i];
     try {
+      // Configure low-latency thinking per model family so structured JSON generation completes in ~2-4s
+      const thinkingConfig = modelName.startsWith('gemini-3')
+        ? { thinkingLevel: ThinkingLevel.LOW }
+        : modelName.startsWith('gemini-2.5')
+        ? { thinkingBudget: 0 }
+        : undefined;
+
+      const mergedConfig = {
+        ...(params.config || {}),
+        ...(thinkingConfig ? { thinkingConfig } : {}),
+      };
+
       const response = await withTimeout(
         ai.models.generateContent({
           model: modelName,
           contents: params.contents,
-          config: params.config,
+          config: mergedConfig,
         }),
         GEMINI_TIMEOUT_MS,
         `Gemini generateContent (${modelName})`
@@ -103,20 +132,19 @@ async function generateContentWithModelFallback(
       return { response, modelUsed: modelName };
     } catch (err: any) {
       lastError = err;
-      logServerError(`Gemini model ${modelName} call failed`, err, { modelName });
+      logServerError(`Gemini model ${modelName} call failed`, err, { modelName, attempt: i + 1 });
       const msg = String(err?.message || err || '').toLowerCase();
-      if (
-        msg.includes('429') ||
-        msg.includes('resource_exhausted') ||
-        msg.includes('quota') ||
-        msg.includes('api_key_invalid') ||
-        msg.includes('timed out')
-      ) {
+      // If API key itself is invalid, fail immediately
+      if (msg.includes('api_key_invalid') || msg.includes('api key not valid')) {
         break;
+      }
+      // Brief backoff before trying the next fallback model
+      if (i < candidateModels.length - 1) {
+        await sleep(250);
       }
     }
   }
-  throw lastError || new Error('Gemini API request failed.');
+  throw lastError || new Error('Gemini API request failed across all available models.');
 }
 
 function parseGeminiJsonSafe(rawText: string | undefined): any {
@@ -154,7 +182,7 @@ function parseGeminiJsonSafe(rawText: string | undefined): any {
   }
 }
 
-// Universal HTTP helpers that work in Vercel Serverless Functions, Express, and raw Node HTTP
+// Universal HTTP helpers for Vercel Serverless Functions, Express, and Node HTTP
 function sendJson(res: any, statusCode: number, payload: any) {
   const body = JSON.stringify(payload);
   res.statusCode = statusCode;
@@ -220,7 +248,6 @@ function resolveRoutePath(req: any): string {
   const rawUrl = String(req.originalUrl || req.url || '/');
   const [pathnamePart, queryPart] = rawUrl.split('?');
 
-  // Check if Vercel rewrite passed __path query parameter
   if (req.query && typeof req.query.__path === 'string' && req.query.__path.trim()) {
     const p = req.query.__path.trim().replace(/^\/+/, '');
     return `/api/${p}`;
@@ -249,55 +276,401 @@ function resolveRoutePath(req: any): string {
   return cleanPath;
 }
 
-// In-memory rate limiting per user/IP (protects free-tier quota)
-const rateLimitWindowMs = 60 * 1000;
-const maxRequestsPerMinute = 25;
-const requestCounters = new Map<string, { count: number; resetAt: number }>();
+// ============================================================================
+// MULTI-LAYER QUESTION FINGERPRINTING & SEMANTIC SIMILARITY ENGINE
+// Supports English (en), Bengali (bn), and Hindi (hi)
+// ============================================================================
 
-function checkRateLimit(key: string): { allowed: boolean; retryAfterSeconds?: number } {
-  const now = Date.now();
-  const entry = requestCounters.get(key);
-  if (!entry || now > entry.resetAt) {
-    requestCounters.set(key, { count: 1, resetAt: now + rateLimitWindowMs });
-    return { allowed: true };
-  }
-  if (entry.count >= maxRequestsPerMinute) {
-    return {
-      allowed: false,
-      retryAfterSeconds: Math.ceil((entry.resetAt - now) / 1000),
-    };
-  }
-  entry.count += 1;
-  return { allowed: true };
+const MULTILINGUAL_STOPWORDS = new Set([
+  // English
+  'the', 'is', 'are', 'was', 'were', 'be', 'been', 'being', 'in', 'on', 'at', 'to', 'for',
+  'of', 'with', 'by', 'from', 'as', 'into', 'about', 'which', 'what', 'who', 'whom', 'whose',
+  'when', 'where', 'why', 'how', 'following', 'choose', 'select', 'correct', 'option', 'answer',
+  'find', 'calculate', 'determine', 'value', 'statement', 'true', 'false', 'according', 'class',
+  'if', 'then', 'that', 'this', 'these', 'those', 'an', 'a', 'and', 'or', 'but', 'not', 'does',
+  'do', 'did', 'has', 'have', 'had', 'will', 'would', 'can', 'could', 'should', 'called', 'known',
+  // Bengali
+  'এবং', 'বা', 'কিন্তু', 'যদি', 'তবে', 'হয়', 'হবে', 'ছিল', 'করে', 'করা', 'থেকে', 'জন্য',
+  'মধ্যে', 'কোন', 'কোনটি', 'কী', 'কি', 'কত', 'কে', 'কোথায়', 'কেন', 'কিভাবে', 'সঠিক',
+  'উত্তর', 'নির্ণয়', 'করো', 'বলতে', 'বলা', 'নিচের', 'প্রদত্ত', 'অনুযায়ী', 'শ্রেণি', 'একটি',
+  'দুটি', 'এর', 'এই', 'ওই', 'সেই', 'তা', 'যা', 'যে', 'না', 'নয়', 'হলো', 'হল',
+  // Hindi
+  'का', 'की', 'के', 'में', 'से', 'को', 'पर', 'और', 'या', 'किन्तु', 'परन्तु', 'यदि', 'तो',
+  'है', 'हैं', 'था', 'थे', 'थी', 'होता', 'होती', 'होते', 'होगा', 'होगी', 'कौन', 'क्या',
+  'कब', 'कहाँ', 'क्यों', 'कैसे', 'कितना', 'कितनी', 'कितने', 'सही', 'उत्तर', 'विकल्प',
+  'चुनें', 'ज्ञात', 'कीजिए', 'निम्नलिखित', 'अनुसार', 'कक्षा', 'एक', 'यह', 'वह', 'इस', 'उस',
+  'कहा', 'जाता', 'जाती', 'द्वारा', 'लिए', 'नहीं',
+]);
+
+function normalizeDigitsToHash(text: string): string {
+  return (text || '')
+    .replace(/[০-৯]/g, (d) => String(d.charCodeAt(0) - 0x09e6))
+    .replace(/[०-९]/g, (d) => String(d.charCodeAt(0) - 0x0966))
+    .replace(/\b\d+(?:[.,]\d+)*\b/g, '#NUM#');
 }
 
 function computeFingerprint(text: string): string {
   const normalized = (text || '')
     .toLowerCase()
-    .replace(/[^\p{L}\p{N}]+/gu, ' ')
+    .replace(/[^\p{L}\p{M}\p{N}]+/gu, ' ')
     .trim();
   return crypto.createHash('sha256').update(normalized).digest('hex').slice(0, 16);
 }
 
-const userFingerprintsHistory = new Map<string, Set<string>>();
-const userConceptHistory = new Map<string, Set<string>>();
-
-function getUserHistory(userId: string) {
-  if (!userFingerprintsHistory.has(userId)) {
-    userFingerprintsHistory.set(userId, new Set<string>());
-  }
-  if (!userConceptHistory.has(userId)) {
-    userConceptHistory.set(userId, new Set<string>());
-  }
-  return {
-    fingerprints: userFingerprintsHistory.get(userId)!,
-    concepts: userConceptHistory.get(userId)!,
-  };
+function extractContentTokens(text: string): string[] {
+  const digitNormalized = normalizeDigitsToHash(text).toLowerCase();
+  const rawTokens = digitNormalized
+    .replace(/[^\p{L}\p{M}#]+/gu, ' ')
+    .split(/\s+/)
+    .map((t) => t.trim())
+    .filter((t) => t.length >= 2 && t !== '#num#' && !MULTILINGUAL_STOPWORDS.has(t));
+  return rawTokens;
 }
+
+function computeStructuralHash(text: string): string {
+  const tokens = extractContentTokens(text);
+  const skeleton = tokens.length > 0 ? tokens.join(' ') : normalizeDigitsToHash(text).toLowerCase().trim();
+  return crypto.createHash('sha256').update(skeleton).digest('hex').slice(0, 16);
+}
+
+function computeTrigramSet(text: string): Set<string> {
+  const cleaned = normalizeDigitsToHash(text)
+    .toLowerCase()
+    .replace(/[^\p{L}\p{M}#]+/gu, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+  const trigrams = new Set<string>();
+  if (cleaned.length < 3) {
+    if (cleaned) trigrams.add(cleaned);
+    return trigrams;
+  }
+  for (let i = 0; i <= cleaned.length - 3; i++) {
+    trigrams.add(cleaned.slice(i, i + 3));
+  }
+  return trigrams;
+}
+
+function computeSetJaccard(a: Set<string>, b: Set<string>): number {
+  if (a.size === 0 || b.size === 0) return 0;
+  let intersection = 0;
+  for (const item of a) {
+    if (b.has(item)) intersection++;
+  }
+  const union = a.size + b.size - intersection;
+  return union > 0 ? intersection / union : 0;
+}
+
+function computeSetDice(a: Set<string>, b: Set<string>): number {
+  if (a.size === 0 || b.size === 0) return 0;
+  let intersection = 0;
+  for (const item of a) {
+    if (b.has(item)) intersection++;
+  }
+  return (2 * intersection) / (a.size + b.size);
+}
+
+export interface HistoryComparisonEntry {
+  fingerprint: string;
+  structuralHash: string;
+  conceptKey: string;
+  questionText: string;
+  options?: string[];
+  classLevel?: number;
+  subject?: string;
+  topic?: string;
+  difficulty?: string;
+}
+
+function isQuestionDuplicateOrSimilar(
+  candidate: {
+    fingerprint: string;
+    structuralHash: string;
+    conceptKey: string;
+    questionText: string;
+    options: string[];
+  },
+  existingEntries: HistoryComparisonEntry[],
+  excludedFingerprintsSet: Set<string>
+): { duplicate: boolean; reason?: string } {
+  if (excludedFingerprintsSet.has(candidate.fingerprint)) {
+    return { duplicate: true, reason: 'exact_fingerprint_match' };
+  }
+
+  const candTokens = new Set(extractContentTokens(candidate.questionText));
+  const candTrigrams = computeTrigramSet(candidate.questionText);
+  const candConceptTokens = new Set(
+    candidate.conceptKey
+      .toLowerCase()
+      .split('_')
+      .filter((t) => t.length >= 3 && !MULTILINGUAL_STOPWORDS.has(t))
+  );
+  const candNormalizedOpts = new Set(
+    candidate.options.map((o) =>
+      o
+        .toLowerCase()
+        .replace(/[^\p{L}\p{M}\p{N}]+/gu, '')
+        .trim()
+    ).filter(Boolean)
+  );
+
+  for (const prev of existingEntries) {
+    if (!prev) continue;
+
+    // 1. Exact fingerprint match
+    if (prev.fingerprint && prev.fingerprint === candidate.fingerprint) {
+      return { duplicate: true, reason: 'exact_fingerprint' };
+    }
+
+    // 2. Number-masked structural skeleton hash match
+    if (
+      prev.structuralHash &&
+      prev.structuralHash === candidate.structuralHash &&
+      candTokens.size >= 3
+    ) {
+      return { duplicate: true, reason: 'identical_structural_skeleton' };
+    }
+
+    // 3. Exact or near-identical conceptKey match
+    if (prev.conceptKey && candidate.conceptKey) {
+      const pKey = prev.conceptKey.toLowerCase().trim();
+      const cKey = candidate.conceptKey.toLowerCase().trim();
+      if (pKey === cKey) {
+        return { duplicate: true, reason: `repeated_concept_key (${cKey})` };
+      }
+      const prevConceptTokens = new Set(
+        pKey.split('_').filter((t) => t.length >= 3 && !MULTILINGUAL_STOPWORDS.has(t))
+      );
+      if (candConceptTokens.size >= 2 && prevConceptTokens.size >= 2) {
+        const conceptOverlap = computeSetJaccard(candConceptTokens, prevConceptTokens);
+        if (conceptOverlap >= 0.78) {
+          return { duplicate: true, reason: `similar_concept_key (${cKey} ~ ${pKey})` };
+        }
+      }
+    }
+
+    // 4. Semantic similarity on questionText (Content Word Jaccard + Character 3-Gram Dice)
+    if (prev.questionText && prev.questionText.trim().length > 5) {
+      const prevTokens = new Set(extractContentTokens(prev.questionText));
+      const tokenJaccard = computeSetJaccard(candTokens, prevTokens);
+      if (tokenJaccard >= 0.52) {
+        return {
+          duplicate: true,
+          reason: `high_semantic_word_similarity (${Math.round(tokenJaccard * 100)}%)`,
+        };
+      }
+
+      const prevTrigrams = computeTrigramSet(prev.questionText);
+      const trigramDice = computeSetDice(candTrigrams, prevTrigrams);
+      if (trigramDice >= 0.64) {
+        return {
+          duplicate: true,
+          reason: `high_trigram_similarity (${Math.round(trigramDice * 100)}%)`,
+        };
+      }
+
+      // 5. Combined moderate stem similarity + overlapping answer options
+      if (tokenJaccard >= 0.35 && Array.isArray(prev.options) && prev.options.length > 0) {
+        const prevOpts = new Set(
+          prev.options
+            .map((o) =>
+              String(o || '')
+                .toLowerCase()
+                .replace(/[^\p{L}\p{M}\p{N}]+/gu, '')
+                .trim()
+            )
+            .filter(Boolean)
+        );
+        let sharedOptions = 0;
+        for (const opt of candNormalizedOpts) {
+          if (prevOpts.has(opt)) sharedOptions++;
+        }
+        if (sharedOptions >= 2) {
+          return {
+            duplicate: true,
+            reason: 'similar_stem_and_shared_answer_options',
+          };
+        }
+      }
+    }
+  }
+
+  return { duplicate: false };
+}
+
+// Per-user persistent in-memory store (supplements client Firestore + localStorage history)
+const userHistoryStore = new Map<string, HistoryComparisonEntry[]>();
+
+function getUserServerHistory(userId: string): HistoryComparisonEntry[] {
+  if (!userHistoryStore.has(userId)) {
+    userHistoryStore.set(userId, []);
+  }
+  return userHistoryStore.get(userId)!;
+}
+
+function recordQuestionsInServerHistory(
+  userId: string,
+  questions: ServerQuestion[]
+) {
+  const list = getUserServerHistory(userId);
+  const existingFps = new Set(list.map((item) => item.fingerprint));
+  for (const q of questions) {
+    if (!existingFps.has(q.fingerprint)) {
+      existingFps.add(q.fingerprint);
+      list.push({
+        fingerprint: q.fingerprint,
+        structuralHash: q.structuralHash,
+        conceptKey: q.conceptKey,
+        questionText: q.questionText,
+        options: q.options,
+        classLevel: q.classLevel,
+        subject: q.subject,
+        topic: q.topic,
+        difficulty: q.difficulty,
+      });
+    }
+  }
+  // Keep latest 500 per user in memory
+  if (list.length > 500) {
+    list.splice(0, list.length - 500);
+  }
+}
+
+// ============================================================================
+// CURRICULUM SUBTOPIC & PEDAGOGICAL REASONING VARIATION MATRIX
+// ============================================================================
+
+const SUBJECT_SUBTOPIC_POOL: Record<string, string[]> = {
+  mathematics: [
+    'Number System, Prime Factorization, HCF & LCM Word Problems',
+    'Fractions, Decimals, Rational & Irrational Numbers',
+    'Ratio, Proportion, Unitary Method & Partnership',
+    'Percentage, Profit & Loss, Discount & Overhead Charges',
+    'Simple Interest, Compound Interest & Uniform Rate of Growth',
+    'Time, Distance, Relative Speed & Work-Rate Problems',
+    'Algebraic Expressions, Identities, Factorization & Polynomials',
+    'Linear Equations, Simultaneous Equations & Quadratic Roots',
+    'Laws of Indices, Exponents, Surds & Logarithmic Relations',
+    'Lines, Angles, Parallel Transversals & Polygon Interior Angles',
+    'Triangle Congruence, Similarity, Pythagoras Theorem & Inequalities',
+    'Quadrilaterals, Parallelograms, Rhombus & Trapezium Properties',
+    'Circle Chords, Tangents, Cyclic Quadrilaterals & Subtended Angles',
+    'Perimeter & Area of Plane Figures, Sectors, Rings & Pathways',
+    'Surface Area & Volume of Cube, Cuboid, Cylinder, Cone & Sphere',
+    'Coordinate Geometry, Distance Formula, Section Formula & Graphs',
+    'Trigonometric Ratios, Standard Angles, Identities & Heights/Distances',
+    'Statistics, Mean, Median, Mode, Frequency Polygons & Probability',
+  ],
+  physical_science: [
+    'Measurement, SI Units, Dimensional Analysis & Scalar/Vector Quantities',
+    'Rest & Motion, Displacement, Velocity, Acceleration & Equations of Motion',
+    'Newton’s Laws of Motion, Momentum Conservation, Impulse & Friction',
+    'Work, Power, Mechanical Energy, Kinetic & Potential Energy Conservation',
+    'Gravitation, Acceleration due to Gravity, Weight & Archimedes Buoyancy',
+    'Pressure in Fluids, Pascal’s Law, Atmospheric Pressure & Barometer',
+    'Heat, Temperature Scales, Specific Heat, Latent Heat & Calorimetry',
+    'Thermal Expansion of Solids, Liquids, Gases & Heat Transfer Modes',
+    'Reflection of Light, Plane & Spherical Mirrors, Magnification & Ray Diagrams',
+    'Refraction of Light, Snell’s Law, Total Internal Reflection, Lenses & Prism',
+    'Sound Waves, Frequency, Wavelength, Echo, Sonar & Audible Range',
+    'Current Electricity, Ohm’s Law, Series/Parallel Resistors, Joule’s Heating & Power',
+    'Electromagnetism, Fleming’s Rules, Electric Motor & Electromagnetic Induction',
+    'Atomic Structure, Isotopes, Isobars, Electronic Configuration & Periodic Table Trends',
+    'Chemical Bonding (Ionic & Covalent), Valency, Oxidation & Reduction Reactions',
+    'Acids, Bases, Salts, pH Scale, Neutralization & Indicators',
+    'Gas Laws (Boyle’s Law, Charles’s Law, Avogadro’s Law, Ideal Gas Equation & Mole Concept)',
+    'Metallurgy, Ores, Alloys, Corrosion, Carbon Compounds & Functional Groups',
+  ],
+  life_science: [
+    'Cell Structure, Prokaryotic vs Eukaryotic Cells & Cell Organelles Functions',
+    'Cell Division: Mitosis, Meiosis, Chromosome Structure, DNA & Cell Cycle',
+    'Plant & Animal Tissues: Meristematic, Permanent, Xylem, Phloem, Epithelial & Muscular',
+    'Photosynthesis: Light & Dark Phases, Pigments, Stomatal Opening & Significance',
+    'Respiration: Aerobic, Anaerobic, Glycolysis, Krebs Cycle & Respiratory Organs',
+    'Plant Nutrition, Transpiration, Ascent of Sap, Mineral Deficiency & Tropism',
+    'Human Digestive System, Enzymes, Peristalsis, Liver, Pancreas & Assimilation',
+    'Circulatory System: Heart Chambers, Double Circulation, Blood Groups, Lymph & ECG',
+    'Excretory System: Nephron Structure, Ultrafiltration, Osmoregulation & Plant Excretion',
+    'Nervous System: Neuron, Synapse, Reflex Arc, Brain Regions & Cranial/Spinal Nerves',
+    'Endocrine System: Pituitary, Thyroid, Adrenal, Pancreas Hormones & Feedback Control',
+    'Plant Hormones (Auxin, Gibberellin, Cytokinin) & Photoperiodism',
+    'Reproduction in Plants & Animals, Pollination, Double Fertilization & Vegetative Propagation',
+    'Genetics & Heredity: Mendel’s Laws, Monohybrid/Dihybrid Cross, Sex Determination & Genetic Disorders',
+    'Evolution: Lamarckism, Darwinism, Natural Selection, Homologous/Analogous Organs & Fossils',
+    'Microorganisms, Immunity, Vaccination, Antibiotics, Pathogens & Human Diseases',
+    'Ecology, Food Chains, Energy Flow, Nitrogen Cycle, Biodiversity Conservation & Hotspots',
+  ],
+  english: [
+    'Parts of Speech, Articles, Prepositions & Phrasal Verbs in Context',
+    'Tenses, Sequence of Tenses, Subject-Verb Agreement & Conditional Clauses',
+    'Active and Passive Voice Transformation across Tenses & Imperatives',
+    'Direct and Indirect (Reported) Speech: Statements, Questions & Commands',
+    'Synthesis & Transformation of Sentences: Simple, Complex & Compound',
+    'Clauses: Noun Clause, Adjective/Relative Clause & Adverbial Clause Identification',
+    'Non-Finite Verbs: Infinitives, Gerunds & Participles Usage',
+    'Vocabulary: Synonyms, Antonyms, Homophones, One-Word Substitution & Idioms',
+    'Prefixes, Suffixes, Word Formation, Spelling Rules & Punctuation',
+    'Figures of Speech: Simile, Metaphor, Personification, Alliteration & Irony',
+    'Reading Comprehension Inference, Tone Analysis & Contextual Meaning',
+    'WBBSE Classic Prose & Poetry Themes, Character Analysis & Literary Devices',
+  ],
+  bangla: [
+    'ধ্বনিতত্ত্ব ও বর্ণবিশ্লেষণ: স্বরধ্বনি, ব্যঞ্জনধ্বনি, উচ্চারণ স্থান ও মাত্রা',
+    'সন্ধি বিচ্ছেদ ও সন্ধিবদ্ধ পদ: স্বরসন্ধি, ব্যঞ্জনসন্ধি ও বিসর্গসন্ধি',
+    'শব্দভাণ্ডার: তৎসম, তদ্ভব, দেশি, বিদেশি, যৌগিক ও যোগরূঢ় শব্দ',
+    'পদ প্রকরণ ও পদ পরিবর্তন: বিশেষ্য থেকে বিশেষণ এবং সর্বনাম ও অব্যয়ের শ্রেণিবিভাগ',
+    'কারক ও বিভক্তি নির্ণয়: কর্তৃ, কর্ম, করণ, নিমিত্ত, অপাদান ও অধিকরণ কারক',
+    'সমাস নির্ণয় ও ব্যাসবাক্য: দ্বন্দ্ব, তৎপুরুষ, কর্মধারয়, বহুব্রীহি, দ্বিগু ও অব্যয়ীভাব',
+    'প্রত্যয়, উপসর্গ ও অনুসর্গ: কৃত্ প্রত্যয় ও তদ্ধিত প্রত্যয়ের প্রয়োগ',
+    'বাক্যতত্ত্ব ও বাক্য পরিবর্তন: সরল, জটিল, যৌগিক এবং কর্তৃবাচ্য, কর্মবাচ্য ও ভাববাচ্য',
+    'শব্দার্থ: সমার্থক শব্দ, বিপরীতার্থক শব্দ, সমোচ্চারিত ভিন্নার্থক শব্দ ও এককথায় প্রকাশ',
+    'বাগধারা, প্রবাদ-প্রবচন, বানান শুদ্ধিকরণ ও যতিচিহ্নের ব্যবহার',
+    'বাংলা সাহিত্যের ইতিহাস ও পাঠ্যপুস্তক: রবীন্দ্রনাথ, নজরুল, শরৎচন্দ্র, সুকুমার রায় ও বিভূতিভূষণ',
+  ],
+  hindi: [
+    'वर्णमाला एवं ध्वनि विचार: स्वर, व्यंजन, उच्चारण स्थान, अल्पप्राण एवं महाप्राण',
+    'संधि एवं संधि-विच्छेद: स्वर संधि (दीर्घ, गुण, वृद्धि, यण, अयादि), व्यंजन एवं विसर्ग संधि',
+    'शब्द भेद: तत्सम, तद्भव, देशज, विदेशज तथा रूढ़, यौगिक एवं योगरूढ़ शब्द',
+    'संज्ञा, सर्वनाम, विशेषण, क्रिया एवं अव्यय के भेद तथा रूपान्तरण',
+    'कारक एवं विभक्ति चिह्न: कर्ता से अधिकरण और संबोधन कारक की पहचान',
+    'समास विग्रह एवं भेद: अव्ययीभाव, तत्पुरुष, कर्मधारय, द्विगु, द्वन्द्व एवं बहुब्रीहि समास',
+    'उपसर्ग एवं प्रत्यय: मूल शब्द से उपसर्ग और प्रत्यय अलग करना',
+    'वाक्य विचार एवं रूपांतरण: सरल, संयुक्त, मिश्र वाक्य तथा कर्तृवाच्य, कर्मवाच्य, भाववाच्य',
+    'पर्यायवाची शब्द, विलोम शब्द, अनेकार्थी शब्द एवं वाक्यांश के लिए एक शब्द',
+    'मुहावरे, लोकोक्तियाँ, वर्तनी शुद्धिकरण एवं विराम चिह्न',
+    'अलंकार एवं छंद: अनुप्रास, यमक, श्लेष, उपमा, रूपक एवं मानवीकरण अलंकार',
+    'हिंदी साहित्य एवं पाठ्यपुस्तक: प्रेमचंद, कबीर, सूरदास, तुलसीदास, महादेवी वर्मा एवं दिनकर',
+  ],
+  gk: [
+    'Indian Freedom Struggle, Key Movements, Dates, Leaders & Historical Treaties',
+    'Indian Constitution, Fundamental Rights, Parliament, President, Supreme Court & Amendments',
+    'Geography of India & West Bengal: Rivers, Mountain Passes, Soil, Climate & National Parks',
+    'Solar System, Astronomy, ISRO Space Missions (Chandrayaan, Aditya-L1, Gaganyaan) & Satellites',
+    'Nobel Laureates, Bharat Ratna, Major Literary Awards, Sports Trophies & Olympic Records',
+    'Inventions, Scientific Discoveries, Diagnostic Instruments, SI Units & Famous Scientists',
+    'World Geography: Continents, Oceans, Straits, Capitals, Currencies & International Boundaries',
+    'United Nations Agencies (UNESCO, UNICEF, WHO, WTO, IMF), Headquarters & Global Summits',
+    'Indian Economy, RBI, Five-Year Plans, National Symbols, Classical Dances & UNESCO Heritage Sites',
+    'Environmental Science, Ramsar Wetlands, Biosphere Reserves, Renewable Energy & Climate Treaties',
+    'Computer Fundamentals, Networking, Cybersecurity, Supercomputers & Modern Technology',
+    'Human Body Facts, Vitamins, Deficiency Diseases, Vaccines & Medical Milestones',
+  ],
+};
+
+const COGNITIVE_REASONING_ANGLES = [
+  'Conceptual Mechanism & Cause-and-Effect Analysis',
+  'Multi-Step Quantitative / Numerical Calculation with Fresh Values',
+  'Real-World Practical Scenario & Applied Problem Solving',
+  'Comparative Distinction & Identifying the Exception / Odd Property',
+  'Critical Thinking & Resolving Common Student Misconceptions',
+  'Deductive Inference from Experimental / Textual / Historical Evidence',
+  'Reverse-Reasoning (Given the Outcome, Find the Underlying Input/Condition)',
+  'Structural Classification & Principle Application',
+];
 
 interface ServerQuestion {
   id: string;
   fingerprint: string;
+  structuralHash: string;
   conceptKey: string;
   classLevel: number;
   subject: string;
@@ -446,6 +819,7 @@ function sanitizeAttemptForClient(attempt: ServerQuizAttempt) {
     return {
       id: q.id,
       fingerprint: q.fingerprint,
+      structuralHash: q.structuralHash,
       conceptKey: q.conceptKey,
       classLevel: q.classLevel,
       subject: q.subject,
@@ -588,13 +962,36 @@ function validateAndNormalizeQuestion(
     options = uniqueOpts.slice(0, 4);
   }
 
-  const correctIndex = Number(raw.correctIndex);
+  let correctIndex = Number(raw.correctIndex);
   if (
     !Number.isInteger(correctIndex) ||
     correctIndex < 0 ||
     correctIndex >= options.length
   ) {
     return null;
+  }
+
+  // Deterministic option shuffle for MCQs so the correct option index is varied across 0..3
+  if (qType === 'mcq' && options.length === 4) {
+    const correctOptionText = options[correctIndex];
+    const hashByte = crypto
+      .createHash('md5')
+      .update(`${raw.questionText}_${index}_${Date.now()}`)
+      .digest()[0];
+    const shift = hashByte % 4;
+    if (shift > 0) {
+      const rotated = [
+        options[(0 + shift) % 4],
+        options[(1 + shift) % 4],
+        options[(2 + shift) % 4],
+        options[(3 + shift) % 4],
+      ];
+      const newIdx = rotated.indexOf(correctOptionText);
+      if (newIdx !== -1) {
+        options = rotated;
+        correctIndex = newIdx;
+      }
+    }
   }
 
   const explanation =
@@ -606,14 +1003,18 @@ function validateAndNormalizeQuestion(
       ? `सही उत्तर "${options[correctIndex]}" है क्योंकि यह पाठ्यक्रम के सिद्धांत के अनुरूप है।`
       : `The correct answer is "${options[correctIndex]}" based on verified curriculum principles.`;
 
-  const fp = computeFingerprint(raw.questionText);
+  const cleanText = raw.questionText.trim();
+  const fp = computeFingerprint(cleanText);
+  const sHash = computeStructuralHash(cleanText);
   const conceptKey =
     typeof raw.conceptKey === 'string' && raw.conceptKey.trim().length > 2
       ? raw.conceptKey
           .toLowerCase()
           .replace(/[^a-z0-9_]/g, '_')
-          .slice(0, 64)
-      : `${config.subject}_c${config.classLevel}_${fp.slice(0, 8)}`;
+          .replace(/_+/g, '_')
+          .replace(/^_|_$/g, '')
+          .slice(0, 80)
+      : `${config.subject}_c${config.classLevel}_${fp.slice(0, 10)}`;
 
   const diff: 'easy' | 'medium' | 'hard' =
     raw.difficulty === 'easy' || raw.difficulty === 'medium' || raw.difficulty === 'hard'
@@ -629,6 +1030,7 @@ function validateAndNormalizeQuestion(
   return {
     id: `q_${config.classLevel}_${config.subject}_${fp}_${index}`,
     fingerprint: fp,
+    structuralHash: sHash,
     conceptKey,
     classLevel: config.classLevel,
     subject: config.subject,
@@ -639,7 +1041,7 @@ function validateAndNormalizeQuestion(
     difficulty: diff,
     language: config.quizLanguage,
     questionType: qType,
-    questionText: raw.questionText.trim(),
+    questionText: cleanText,
     options,
     correctIndex,
     explanation,
@@ -650,600 +1052,312 @@ function validateAndNormalizeQuestion(
   };
 }
 
-function generateVerifiedCurriculumQuestions(
-  config: {
-    classLevel: number;
-    subject: string;
-    quizLanguage: 'en' | 'bn' | 'hi';
-    topic: string;
-    difficulty: string;
-    questionCount: number;
-    questionType: string;
-  },
-  excludedFingerprints: Set<string>,
-  excludedConcepts: Set<string>
-): ServerQuestion[] {
-  const results: ServerQuestion[] = [];
-  const lang = config.quizLanguage;
-  const cls = config.classLevel;
-  const subj = config.subject;
+// ============================================================================
+// DYNAMIC GEMINI QUIZ GENERATION WITH MULTI-PASS DUPLICATE REPLACEMENT
+// Never returns hardcoded or cached quizzes.
+// ============================================================================
 
-  const addCandidate = (q: {
-    conceptKey: string;
-    topic: string;
-    difficulty: 'easy' | 'medium' | 'hard';
-    questionType: 'mcq' | 'tf';
-    en: { q: string; opts: string[]; ans: number; exp: string; hint?: string };
-    bn: { q: string; opts: string[]; ans: number; exp: string; hint?: string };
-    hi: { q: string; opts: string[]; ans: number; exp: string; hint?: string };
-  }) => {
-    if (results.length >= config.questionCount) return;
-    const localized = q[lang] || q.en;
-    const fp = computeFingerprint(localized.q);
-    if (excludedFingerprints.has(fp) || excludedConcepts.has(q.conceptKey)) {
-      return;
+async function generateFreshVerifiedQuizQuestions(params: {
+  ai: GoogleGenAI;
+  classLevel: number;
+  subject: string;
+  quizLanguage: 'en' | 'bn' | 'hi';
+  topic: string;
+  difficulty: string;
+  questionCount: number;
+  questionType: string;
+  existingHistory: HistoryComparisonEntry[];
+  excludedFingerprints: Set<string>;
+}): Promise<{
+  questions: ServerQuestion[];
+  modelUsed: string;
+  rejectedDuplicatesCount: number;
+}> {
+  const {
+    ai,
+    classLevel,
+    subject,
+    quizLanguage,
+    topic,
+    difficulty,
+    questionCount,
+    questionType,
+    existingHistory,
+    excludedFingerprints,
+  } = params;
+
+  const langName =
+    quizLanguage === 'bn'
+      ? 'Bengali (বাংলা)'
+      : quizLanguage === 'hi'
+      ? 'Hindi (हिन्दी)'
+      : 'English';
+
+  // Working comparison store starts with all previously seen questions for this user/class/subject
+  const comparisonPool: HistoryComparisonEntry[] = [...existingHistory];
+  const workingFingerprints = new Set<string>(excludedFingerprints);
+  for (const h of existingHistory) {
+    if (h.fingerprint) workingFingerprints.add(h.fingerprint);
+  }
+
+  const acceptedQuestions: ServerQuestion[] = [];
+  const rejectedStemsThisRun: string[] = [];
+  let resolvedModelName = ACTIVE_GEMINI_MODEL;
+  let rejectedDuplicatesCount = 0;
+
+  // Select diverse curriculum subtopics and rotate cognitive angles for this attempt
+  const fullSubtopicPool = SUBJECT_SUBTOPIC_POOL[subject] || SUBJECT_SUBTOPIC_POOL.gk;
+  const randomSeedNumber = crypto.randomBytes(4).readUInt32BE(0);
+  const rotatedSubtopics = fullSubtopicPool
+    .map((item, idx) => ({
+      item,
+      score: ((idx * 31 + randomSeedNumber) % 997),
+    }))
+    .sort((a, b) => a.score - b.score)
+    .map((x) => x.item);
+
+  for (let pass = 1; pass <= MAX_GENERATION_PASSES; pass++) {
+    const remainingNeeded = questionCount - acceptedQuestions.length;
+    if (remainingNeeded <= 0) break;
+
+    // Request a small buffer (+2) so if 1-2 items are similar to history, we still complete in Pass 1
+    const batchRequestCount =
+      pass === 1
+        ? Math.min(remainingNeeded + 2, 32)
+        : Math.min(remainingNeeded + 3, 15);
+
+    // Build token-optimized exclusion context from history + current accepted + rejected
+    const recentConceptKeys = Array.from(
+      new Set(
+        comparisonPool
+          .map((h) => h.conceptKey)
+          .filter((k) => typeof k === 'string' && k.length > 2)
+      )
+    ).slice(-45);
+
+    const recentQuestionStems = comparisonPool
+      .map((h) => (h.questionText || '').replace(/\s+/g, ' ').trim())
+      .filter((s) => s.length > 5)
+      .slice(-28)
+      .map((s, idx) => `${idx + 1}. "${s.slice(0, 105)}"`);
+
+    const slotAssignments: string[] = [];
+    for (let s = 0; s < batchRequestCount; s++) {
+      const subtopicChoice =
+        topic && topic !== 'All Verified Chapters'
+          ? `${topic} — Focus Aspect #${((randomSeedNumber + s + pass * 7) % 12) + 1}`
+          : rotatedSubtopics[(s + (pass - 1) * 5) % rotatedSubtopics.length];
+      const angleChoice =
+        COGNITIVE_REASONING_ANGLES[(randomSeedNumber + s + pass * 3) % COGNITIVE_REASONING_ANGLES.length];
+      slotAssignments.push(
+        `- Question ${s + 1}: Subtopic Focus = [${subtopicChoice}] | Reasoning Task = [${angleChoice}]`
+      );
     }
-    excludedFingerprints.add(fp);
-    excludedConcepts.add(q.conceptKey);
-    results.push({
-      id: `q_${cls}_${subj}_${fp}_${results.length}`,
-      fingerprint: fp,
-      conceptKey: q.conceptKey,
-      classLevel: cls,
-      subject: subj,
-      topic: q.topic,
-      difficulty: q.difficulty,
-      language: lang,
-      questionType: q.questionType,
-      questionText: localized.q,
-      options: localized.opts,
-      correctIndex: localized.ans,
-      explanation: localized.exp,
-      hint: localized.hint,
+
+    const systemInstruction = `You are a senior academic curriculum examiner for Classes 5 to 10 (WBBPE/WBBSE & National standard).
+CRITICAL GENERATION RULES:
+1. Subject Independence: The academic subject being tested is "${subject}". The presentation language (Quiz Language) is "${langName}".
+2. Even if the subject is Bangla, English, or Hindi, you MUST write the question stem, options, hint, and explanation strictly in "${langName}" while testing the academic curriculum of "${subject}" for Class ${classLevel}.
+3. Every question must be 100% factually, scientifically, and mathematically accurate for Class ${classLevel}. Double-check all calculations so the option at correctIndex is indisputably right.
+4. ZERO DUPLICATES & HIGH DIVERSITY: Never repeat or paraphrase any previously asked question stem or concept key listed in the prompt. Vary the concepts, scenarios, examples, numerical values, and reasoning tasks across every question.
+5. For questionType "${questionType}": if "mcq", provide 4 distinct, plausible options and correctIndex (0-3). If "tf", provide 2 options (True/False in ${langName}) and correctIndex (0 or 1). If "mixed", include a mix of "mcq" and "tf" questions.`;
+
+    const exclusionSection =
+      recentConceptKeys.length > 0 || recentQuestionStems.length > 0 || rejectedStemsThisRun.length > 0
+        ? `\nSTRICT EXCLUSION LIST (DO NOT REPEAT OR PARAPHRASE ANY OF THESE):
+- Previously Tested Concept Keys to Avoid: [${recentConceptKeys.join(', ') || 'none'}]
+${
+  recentQuestionStems.length > 0
+    ? `- Previously Asked Question Stems for this User (Forbidden to repeat or reword):\n${recentQuestionStems.join('\n')}`
+    : ''
+}
+${
+  rejectedStemsThisRun.length > 0
+    ? `- Duplicate Stems Rejected in Earlier Pass (MUST NOT reuse these concepts or structures):\n${rejectedStemsThisRun
+        .slice(-10)
+        .map((r) => `  * "${r}"`)
+        .join('\n')}`
+    : ''
+}\n`
+        : '';
+
+    const prompt = `${
+      pass > 1
+        ? `[REPLACEMENT GENERATION PASS #${pass}]: Some questions in the previous pass overlapped with the student's quiz history. Generate ${batchRequestCount} BRAND-NEW, completely different replacement questions.\n`
+        : ''
+    }Generate exactly ${batchRequestCount} unique, fresh quiz questions for:
+- Class Level: Class ${classLevel}
+- Academic Subject: ${subject}
+- Selected Topic/Chapter: ${topic}
+- Difficulty Level: ${difficulty}
+- Question Type: ${questionType}
+- Presentation Language: ${langName} (language code: ${quizLanguage})
+- Cryptographic Entropy Seed: ${Date.now()}_${randomSeedNumber}_pass${pass}
+
+REQUIRED SUBTOPIC & REASONING TASK DIVERSITY PLAN FOR THIS BATCH:
+${slotAssignments.join('\n')}
+${exclusionSection}`;
+
+    const { response, modelUsed } = await generateContentWithModelFallback(ai, {
+      contents: prompt,
+      config: {
+        systemInstruction,
+        temperature: pass === 1 ? 0.9 : 0.95,
+        responseMimeType: 'application/json',
+        responseSchema: {
+          type: Type.ARRAY,
+          items: {
+            type: Type.OBJECT,
+            properties: {
+              questionText: {
+                type: Type.STRING,
+                description: `Full question text written in ${langName}`,
+              },
+              questionType: {
+                type: Type.STRING,
+                description: 'Either "mcq" or "tf"',
+              },
+              options: {
+                type: Type.ARRAY,
+                items: { type: Type.STRING },
+                description: '4 distinct options for mcq, or 2 options for tf',
+              },
+              correctIndex: {
+                type: Type.INTEGER,
+                description: '0-based index of the single correct option',
+              },
+              explanation: {
+                type: Type.STRING,
+                description: `Step-by-step explanation of why the correct option is right, in ${langName}`,
+              },
+              hint: {
+                type: Type.STRING,
+                description: `Short helpful hint without giving away the answer, in ${langName}`,
+              },
+              topic: {
+                type: Type.STRING,
+                description: 'Specific chapter or subtopic name',
+              },
+              difficulty: {
+                type: Type.STRING,
+                description: 'easy, medium, or hard',
+              },
+              conceptKey: {
+                type: Type.STRING,
+                description:
+                  'Specific snake_case identifier of the exact academic concept & scenario tested',
+              },
+            },
+            required: [
+              'questionText',
+              'questionType',
+              'options',
+              'correctIndex',
+              'explanation',
+              'topic',
+              'difficulty',
+              'conceptKey',
+            ],
+          },
+        },
+      },
     });
-  };
 
-  const seedOffset = Math.floor(Math.random() * 50) + excludedFingerprints.size * 3;
+    resolvedModelName = modelUsed;
+    const parsed = parseGeminiJsonSafe(response?.text);
+    const candidateArray = Array.isArray(parsed)
+      ? parsed
+      : Array.isArray(parsed?.questions)
+      ? parsed.questions
+      : Array.isArray(parsed?.items)
+      ? parsed.items
+      : [];
 
-  if (subj === 'mathematics') {
-    for (let i = 0; i < config.questionCount + 25; i++) {
-      const n = seedOffset + i + 2;
-      const variant = i % 5;
+    for (const rawItem of candidateArray) {
+      if (acceptedQuestions.length >= questionCount) break;
 
-      if (variant === 0) {
-        const l = n + 4;
-        const w = n + 1;
-        const perim = 2 * (l + w);
-        const area = l * w;
-        addCandidate({
-          conceptKey: `math_c${cls}_rect_perim_${l}_${w}`,
-          topic: config.topic || `Class ${cls} Mensuration & Geometry`,
-          difficulty: 'easy',
-          questionType: 'mcq',
-          en: {
-            q: `For a Class ${cls} geometry exercise, a rectangular field has a length of ${l} m and a breadth of ${w} m. What is its perimeter?`,
-            opts: [`${perim} m`, `${area} m`, `${l + w} m`, `${perim + 6} m`],
-            ans: 0,
-            exp: `Perimeter of a rectangle = 2 × (length + breadth) = 2 × (${l} + ${w}) = 2 × ${l + w} = ${perim} m.`,
-            hint: 'Use the formula Perimeter = 2 × (Length + Breadth).',
-          },
-          bn: {
-            q: `শ্রেণি ${cls}-এর জ্যামিতি অনুশীলনী অনুযায়ী, একটি আয়তাকার মাঠের দৈর্ঘ্য ${l} মিটার এবং প্রস্থ ${w} মিটার হলে, মাঠটির পরিসীমা কত?`,
-            opts: [`${perim} মিটার`, `${area} মিটার`, `${l + w} মিটার`, `${perim + 6} মিটার`],
-            ans: 0,
-            exp: `আয়তক্ষেত্রের পরিসীমা = ২ × (দৈর্ঘ্য + প্রস্থ) = ২ × (${l} + ${w}) = ২ × ${l + w} = ${perim} মিটার।`,
-            hint: 'পরিসীমা = ২ × (দৈর্ঘ্য + প্রস্থ) সূত্রটি ব্যবহার করো।',
-          },
-          hi: {
-            q: `कक्षा ${cls} के ज्यामिति अभ्यास के अनुसार, एक आयताकार मैदान की लंबाई ${l} मीटर और चौड़ाई ${w} मीटर है। इसका परिमाप क्या है?`,
-            opts: [`${perim} मीटर`, `${area} मीटर`, `${l + w} मीटर`, `${perim + 6} मीटर`],
-            ans: 0,
-            exp: `आयत का परिमाप = 2 × (लंबाई + चौड़ाई) = 2 × (${l} + ${w}) = 2 × ${l + w} = ${perim} मीटर।`,
-            hint: 'परिमाप = 2 × (लंबाई + चौड़ाई) सूत्र का प्रयोग करें।',
-          },
-        });
-      } else if (variant === 1) {
-        const xVal = (i % 12) + 3;
-        const a = (cls % 4) + 2;
-        const b = n + 5;
-        const rhs = a * xVal + b;
-        addCandidate({
-          conceptKey: `math_c${cls}_linear_eq_${a}_${b}_${rhs}`,
-          topic: config.topic || `Class ${cls} Algebra & Linear Equations`,
-          difficulty: 'medium',
-          questionType: 'mcq',
-          en: {
-            q: `Solve the linear equation for x: ${a}x + ${b} = ${rhs}.`,
-            opts: [`x = ${xVal}`, `x = ${xVal + 2}`, `x = ${xVal - 1}`, `x = ${xVal + 4}`],
-            ans: 0,
-            exp: `Subtracting ${b} from both sides gives ${a}x = ${rhs - b}. Dividing both sides by ${a} gives x = ${rhs - b} / ${a} = ${xVal}.`,
-            hint: `First subtract ${b} from ${rhs}, then divide by ${a}.`,
-          },
-          bn: {
-            q: `সমীকরণটি সমাধান করে x-এর মান নির্ণয় করো: ${a}x + ${b} = ${rhs}।`,
-            opts: [`x = ${xVal}`, `x = ${xVal + 2}`, `x = ${xVal - 1}`, `x = ${xVal + 4}`],
-            ans: 0,
-            exp: `উভয় পক্ষ থেকে ${b} বিয়োগ করলে পাই ${a}x = ${rhs - b}। এরপর ${a} দিয়ে ভাগ করলে পাই x = ${rhs - b} ÷ ${a} = ${xVal}।`,
-            hint: `প্রথমে ${rhs} থেকে ${b} বিয়োগ করো, তারপর ${a} দিয়ে ভাগ করো।`,
-          },
-          hi: {
-            q: `रैखिक समीकरण को हल करके x का मान ज्ञात कीजिए: ${a}x + ${b} = ${rhs}।`,
-            opts: [`x = ${xVal}`, `x = ${xVal + 2}`, `x = ${xVal - 1}`, `x = ${xVal + 4}`],
-            ans: 0,
-            exp: `दोनों पक्षों से ${b} घटाने पर ${a}x = ${rhs - b} प्राप्त होता है। ${a} से भाग देने पर x = ${rhs - b} ÷ ${a} = ${xVal}।`,
-            hint: `पहले ${rhs} में से ${b} घटाएं, फिर ${a} से भाग दें।`,
-          },
-        });
-      } else if (variant === 2) {
-        const p = ((i % 9) + 2) * 500;
-        const r = (cls % 5) + 4;
-        const t = 2;
-        const si = (p * r * t) / 100;
-        addCandidate({
-          conceptKey: `math_c${cls}_simple_interest_${p}_${r}_${t}`,
-          topic: config.topic || `Class ${cls} Arithmetic & Commercial Math`,
-          difficulty: 'medium',
-          questionType: 'mcq',
-          en: {
-            q: `Calculate the Simple Interest on a principal of ₹${p} at ${r}% per annum for ${t} years.`,
-            opts: [`₹${si}`, `₹${si + 50}`, `₹${si * 2}`, `₹${Math.max(10, si - 40)}`],
-            ans: 0,
-            exp: `Simple Interest (SI) = (P × R × T) / 100 = (${p} × ${r} × ${t}) / 100 = ₹${si}.`,
-            hint: 'Use SI = (Principal × Rate × Time) ÷ 100.',
-          },
-          bn: {
-            q: `বার্ষিক ${r}% সরল সুদের হারে ₹${p} আসলের ${t} বছরের সরল সুদ কত হবে?`,
-            opts: [`₹${si}`, `₹${si + 50}`, `₹${si * 2}`, `₹${Math.max(10, si - 40)}`],
-            ans: 0,
-            exp: `সরল সুদ (I) = (P × R × T) / 100 = (${p} × ${r} × ${t}) / 100 = ₹${si}।`,
-            hint: 'সরল সুদ = (আসল × সুদের হার × সময়) ÷ ১০০ সূত্রটি প্রয়োগ করো।',
-          },
-          hi: {
-            q: `₹${p} के मूलधन पर ${r}% वार्षिक दर से ${t} वर्षों का साधारण ब्याज ज्ञात कीजिए।`,
-            opts: [`₹${si}`, `₹${si + 50}`, `₹${si * 2}`, `₹${Math.max(10, si - 40)}`],
-            ans: 0,
-            exp: `साधारण ब्याज (SI) = (मूलधन × दर × समय) / 100 = (${p} × ${r} × ${t}) / 100 = ₹${si}।`,
-            hint: 'साधारण ब्याज = (P × R × T) ÷ 100 सूत्र का उपयोग करें।',
-          },
-        });
-      } else if (variant === 3) {
-        const a1 = 45 + (i % 35);
-        const a2 = 50 + ((i * 3) % 30);
-        const a3 = 180 - (a1 + a2);
-        addCandidate({
-          conceptKey: `math_c${cls}_triangle_angle_${a1}_${a2}`,
-          topic: config.topic || `Class ${cls} Triangles & Angle Properties`,
-          difficulty: 'easy',
-          questionType: 'mcq',
-          en: {
-            q: `Two interior angles of a triangle measure ${a1}° and ${a2}°. What is the measure of the third interior angle?`,
-            opts: [`${a3}°`, `${a3 + 10}°`, `${Math.max(5, a3 - 10)}°`, `${180 - a1}°`],
-            ans: 0,
-            exp: `The sum of interior angles of a triangle is always 180°. Therefore, the third angle = 180° - (${a1}° + ${a2}°) = 180° - ${a1 + a2}° = ${a3}°.`,
-            hint: 'The three interior angles of any triangle add up to 180°.',
-          },
-          bn: {
-            q: `একটি ত্রিভুজের দুটি অন্তঃকোণের পরিমাপ ${a1}° এবং ${a2}° হলে, তৃতীয় কোণটির পরিমাপ কত?`,
-            opts: [`${a3}°`, `${a3 + 10}°`, `${Math.max(5, a3 - 10)}°`, `${180 - a1}°`],
-            ans: 0,
-            exp: `ত্রিভুজের তিনটি কোণের সমষ্টি ১৮০°। সুতরাং তৃতীয় কোণ = ১৮০° - (${a1}° + ${a2}°) = ১৮০° - ${a1 + a2}° = ${a3}°।`,
-            hint: 'ত্রিভুজের তিন কোণের সমষ্টি সর্বদা ১৮০°।',
-          },
-          hi: {
-            q: `एक त्रिभुज के दो अंतः कोण ${a1}° और ${a2}° हैं। तीसरे कोण का मान क्या होगा?`,
-            opts: [`${a3}°`, `${a3 + 10}°`, `${Math.max(5, a3 - 10)}°`, `${180 - a1}°`],
-            ans: 0,
-            exp: `त्रिभुज के तीनों अंतः कोणों का योग 180° होता है। अतः तीसरा कोण = 180° - (${a1}° + ${a2}°) = 180° - ${a1 + a2}° = ${a3}°।`,
-            hint: 'त्रिभुज के तीनों कोणों का योग 180° होता है।',
-          },
-        });
-      } else {
-        const k = (i % 6) + 2;
-        const r1 = 3;
-        const r2 = 5;
-        const total = (r1 + r2) * k * 4;
-        const part1 = r1 * k * 4;
-        addCandidate({
-          conceptKey: `math_c${cls}_ratio_division_${total}_${r1}_${r2}`,
-          topic: config.topic || `Class ${cls} Ratio & Proportion`,
-          difficulty: 'hard',
-          questionType: 'mcq',
-          en: {
-            q: `If ${total} books are divided between two school libraries in the ratio ${r1}:${r2}, how many books does the first library receive?`,
-            opts: [`${part1}`, `${total - part1}`, `${part1 + 4}`, `${part1 - 4}`],
-            ans: 0,
-            exp: `Sum of ratio terms = ${r1} + ${r2} = ${r1 + r2}. First library's share = (${r1} / ${r1 + r2}) × ${total} = ${part1} books.`,
-            hint: `Divide ${total} by (${r1} + ${r2}) and multiply by ${r1}.`,
-          },
-          bn: {
-            q: `যদি ${total}টি বই দুটি বিদ্যালয়ের গ্রন্থাগারের মধ্যে ${r1}:${r2} অনুপাতে ভাগ করে দেওয়া হয়, তবে প্রথম গ্রন্থাগারটি কয়টি বই পাবে?`,
-            opts: [`${part1}টি`, `${total - part1}টি`, `${part1 + 4}টি`, `${part1 - 4}টি`],
-            ans: 0,
-            exp: `অনুপাতের পদদ্বয়ের সমষ্টি = ${r1} + ${r2} = ${r1 + r2}। প্রথম গ্রন্থাগারের অংশ = (${r1} / ${r1 + r2}) × ${total} = ${part1}টি বই।`,
-            hint: `মোট সংখ্যাকে (${r1} + ${r2}) দিয়ে ভাগ করে ${r1} দিয়ে গুণ করো।`,
-          },
-          hi: {
-            q: `यदि ${total} पुस्तकों को दो विद्यालय पुस्तकालयों के बीच ${r1}:${r2} के अनुपात में बांटा जाता है, तो पहले पुस्तकालय को कितनी पुस्तकें मिलेंगी?`,
-            opts: [`${part1}`, `${total - part1}`, `${part1 + 4}`, `${part1 - 4}`],
-            ans: 0,
-            exp: `अनुपात पदों का योग = ${r1} + ${r2} = ${r1 + r2}। पहले पुस्तकालय का भाग = (${r1} / ${r1 + r2}) × ${total} = ${part1} पुस्तकें।`,
-            hint: `${total} को (${r1} + ${r2}) से भाग देकर ${r1} से गुणा करें।`,
-          },
-        });
+      const normalized = validateAndNormalizeQuestion(
+        rawItem,
+        {
+          classLevel,
+          subject,
+          quizLanguage,
+          topic,
+          difficulty,
+        },
+        acceptedQuestions.length
+      );
+
+      if (!normalized) continue;
+
+      const simCheck = isQuestionDuplicateOrSimilar(
+        normalized,
+        comparisonPool,
+        workingFingerprints
+      );
+
+      if (simCheck.duplicate) {
+        rejectedDuplicatesCount++;
+        rejectedStemsThisRun.push(
+          `${normalized.questionText.slice(0, 90)} [reason: ${simCheck.reason}]`
+        );
+        // On the final pass only, if we still need questions to complete the requested count
+        // and the question is not an exact fingerprint duplicate, accept it rather than failing the whole quiz
+        if (
+          pass === MAX_GENERATION_PASSES &&
+          !workingFingerprints.has(normalized.fingerprint) &&
+          simCheck.reason !== 'exact_fingerprint' &&
+          simCheck.reason !== 'exact_fingerprint_match'
+        ) {
+          workingFingerprints.add(normalized.fingerprint);
+          comparisonPool.push({
+            fingerprint: normalized.fingerprint,
+            structuralHash: normalized.structuralHash,
+            conceptKey: normalized.conceptKey,
+            questionText: normalized.questionText,
+            options: normalized.options,
+            classLevel: normalized.classLevel,
+            subject: normalized.subject,
+            topic: normalized.topic,
+            difficulty: normalized.difficulty,
+          });
+          acceptedQuestions.push(normalized);
+        }
+        continue;
       }
-    }
-  } else if (subj === 'physical_science') {
-    for (let i = 0; i < config.questionCount + 25; i++) {
-      const n = seedOffset + i + 2;
-      const variant = i % 4;
-      if (variant === 0) {
-        const current = (i % 5) + 2;
-        const resistance = (cls % 6) + 3 + (i % 4);
-        const voltage = current * resistance;
-        addCandidate({
-          conceptKey: `phys_c${cls}_ohms_law_${current}_${resistance}`,
-          topic: config.topic || `Class ${cls} Current Electricity & Ohm's Law`,
-          difficulty: 'medium',
-          questionType: 'mcq',
-          en: {
-            q: `According to Ohm's Law, if an electric current of ${current} A flows through a resistor of ${resistance} Ω, what is the potential difference (voltage) across it?`,
-            opts: [`${voltage} V`, `${voltage + 5} V`, `${resistance + current} V`, `${Math.max(1, resistance - current)} V`],
-            ans: 0,
-            exp: `By Ohm's Law, V = I × R = ${current} A × ${resistance} Ω = ${voltage} V.`,
-            hint: 'Use the formula V = I × R.',
-          },
-          bn: {
-            q: `ওহমের সূত্রানুসারে, ${resistance} Ω রোধের একটি পরিবাহীর মধ্য দিয়ে ${current} A তড়িৎ প্রবাহিত হলে পরিবাহীর দুই প্রান্তের বিভবপ্রভেদ কত হবে?`,
-            opts: [`${voltage} V`, `${voltage + 5} V`, `${resistance + current} V`, `${Math.max(1, resistance - current)} V`],
-            ans: 0,
-            exp: `ওহমের সূত্র অনুযায়ী, V = I × R = ${current} A × ${resistance} Ω = ${voltage} V।`,
-            hint: 'V = I × R সূত্রটি ব্যবহার করো।',
-          },
-          hi: {
-            q: `ओम के नियम के अनुसार, यदि ${resistance} Ω के प्रतिरोधक से ${current} A की विद्युत धारा प्रवाहित होती है, तो उसके सिरों के बीच विभवांतर (वोल्टेज) क्या होगा?`,
-            opts: [`${voltage} V`, `${voltage + 5} V`, `${resistance + current} V`, `${Math.max(1, resistance - current)} V`],
-            ans: 0,
-            exp: `ओम के नियम से, V = I × R = ${current} A × ${resistance} Ω = ${voltage} V।`,
-            hint: 'सूत्र V = I × R का प्रयोग करें।',
-          },
-        });
-      } else if (variant === 1) {
-        const mass = (i % 7) + 2;
-        const acc = (i % 4) + 3;
-        const force = mass * acc;
-        addCandidate({
-          conceptKey: `phys_c${cls}_newton_force_${mass}_${acc}`,
-          topic: config.topic || `Class ${cls} Force & Laws of Motion`,
-          difficulty: 'easy',
-          questionType: 'mcq',
-          en: {
-            q: `What net force in Newtons is required to give a body of mass ${mass} kg an acceleration of ${acc} m/s²?`,
-            opts: [`${force} N`, `${mass + acc} N`, `${force * 2} N`, `${Math.max(1, force - 3)} N`],
-            ans: 0,
-            exp: `By Newton's Second Law of Motion, Force (F) = mass (m) × acceleration (a) = ${mass} kg × ${acc} m/s² = ${force} N.`,
-            hint: 'Force = Mass × Acceleration.',
-          },
-          bn: {
-            q: `${mass} kg ভরের কোনো বস্তুর ওপর কত বল প্রযুক্ত হলে বস্তুটিতে ${acc} m/s² ত্বরণ সৃষ্টি হবে?`,
-            opts: [`${force} N`, `${mass + acc} N`, `${force * 2} N`, `${Math.max(1, force - 3)} N`],
-            ans: 0,
-            exp: `নিউটনের দ্বিতীয় গতিসূত্র অনুযায়ী, বল (F) = ভর (m) × ত্বরণ (a) = ${mass} kg × ${acc} m/s² = ${force} N।`,
-            hint: 'বল = ভর × ত্বরণ সূত্রটি প্রয়োগ করো।',
-          },
-          hi: {
-            q: `${mass} kg द्रव्यमान की किसी वस्तु में ${acc} m/s² का त्वरण उत्पन्न करने के लिए कितने न्यूटन बल की आवश्यकता होगी?`,
-            opts: [`${force} N`, `${mass + acc} N`, `${force * 2} N`, `${Math.max(1, force - 3)} N`],
-            ans: 0,
-            exp: `न्यूटन के गति के द्वितीय नियम के अनुसार, बल (F) = द्रव्यमान (m) × त्वरण (a) = ${mass} kg × ${acc} m/s² = ${force} N।`,
-            hint: 'बल = द्रव्यमान × त्वरण सूत्र का उपयोग करें।',
-          },
-        });
-      } else if (variant === 2) {
-        const dist = ((i % 6) + 3) * 20;
-        const time = 4;
-        const speed = dist / time;
-        addCandidate({
-          conceptKey: `phys_c${cls}_kinematics_speed_${dist}_${time}`,
-          topic: config.topic || `Class ${cls} Motion & Kinematics`,
-          difficulty: 'easy',
-          questionType: 'mcq',
-          en: {
-            q: `An object travels a distance of ${dist} meters uniformly in ${time} seconds. What is its speed?`,
-            opts: [`${speed} m/s`, `${speed + 5} m/s`, `${dist * time} m/s`, `${Math.max(2, speed - 4)} m/s`],
-            ans: 0,
-            exp: `Speed = Distance / Time = ${dist} m / ${time} s = ${speed} m/s.`,
-            hint: 'Divide total distance by time taken.',
-          },
-          bn: {
-            q: `একটি বস্তু সমদ্রুতিতে ${time} সেকেন্ডে ${dist} মিটার দূরত্ব অতিক্রম করলে তার দ্রুতি কত?`,
-            opts: [`${speed} m/s`, `${speed + 5} m/s`, `${dist * time} m/s`, `${Math.max(2, speed - 4)} m/s`],
-            ans: 0,
-            exp: `দ্রুতি = অতিক্রান্ত দূরত্ব ÷ সময় = ${dist} m ÷ ${time} s = ${speed} m/s।`,
-            hint: 'দূরত্বকে সময় দিয়ে ভাগ করো।',
-          },
-          hi: {
-            q: `एक वस्तु समान चाल से ${time} सेकंड में ${dist} मीटर की दूरी तय करती है। उसकी चाल क्या है?`,
-            opts: [`${speed} m/s`, `${speed + 5} m/s`, `${dist * time} m/s`, `${Math.max(2, speed - 4)} m/s`],
-            ans: 0,
-            exp: `चाल = दूरी ÷ समय = ${dist} m ÷ ${time} s = ${speed} m/s।`,
-            hint: 'कुल दूरी को समय से विभाजित करें।',
-          },
-        });
-      } else {
-        const z = (n % 18) + 1;
-        const neutrons = z + (n % 3);
-        const massNum = z + neutrons;
-        addCandidate({
-          conceptKey: `phys_c${cls}_atomic_mass_${z}_${neutrons}`,
-          topic: config.topic || `Class ${cls} Atomic Structure & Matter`,
-          difficulty: 'hard',
-          questionType: 'mcq',
-          en: {
-            q: `An atom of an element has ${z} protons and ${neutrons} neutrons in its nucleus. What is its mass number (A)?`,
-            opts: [`${massNum}`, `${z}`, `${neutrons}`, `${massNum + z}`],
-            ans: 0,
-            exp: `Mass Number (A) = Number of protons (Z) + Number of neutrons (N) = ${z} + ${neutrons} = ${massNum}.`,
-            hint: 'Mass number is the total of protons and neutrons in the nucleus.',
-          },
-          bn: {
-            q: `কোনো মৌলের পরমাণুর নিউক্লিয়াসে ${z}টি প্রোটন এবং ${neutrons}টি নিউট্রন থাকলে ওই পরমাণুটির ভরসংখ্যা (A) কত?`,
-            opts: [`${massNum}`, `${z}`, `${neutrons}`, `${massNum + z}`],
-            ans: 0,
-            exp: `ভরসংখ্যা (A) = প্রোটন সংখ্যা (Z) + নিউট্রন সংখ্যা (N) = ${z} + ${neutrons} = ${massNum}।`,
-            hint: 'ভরসংখ্যা = প্রোটন সংখ্যা + নিউট্রন সংখ্যা।',
-          },
-          hi: {
-            q: `किसी तत्व के परमाणु के नाभिक में ${z} प्रोटॉन और ${neutrons} न्यूट्रॉन हैं। इसकी द्रव्यमान संख्या (A) क्या है?`,
-            opts: [`${massNum}`, `${z}`, `${neutrons}`, `${massNum + z}`],
-            ans: 0,
-            exp: `द्रव्यमान संख्या (A) = प्रोटॉनों की संख्या (Z) + न्यूट्रॉनों की संख्या (N) = ${z} + ${neutrons} = ${massNum}।`,
-            hint: 'द्रव्यमान संख्या प्रोटॉन और न्यूट्रॉन के योग के बराबर होती है।',
-          },
-        });
-      }
-    }
-  } else {
-    // Rich multilingual bank for life_science, bangla, english, hindi, and gk
-    const bankItems = [
-      {
-        key: 'mitochondria_atp',
-        en: {
-          q: 'Which cell organelle is known as the powerhouse of the cell because it synthesizes ATP through cellular respiration?',
-          opts: ['Mitochondria', 'Ribosome', 'Golgi apparatus', 'Lysosome'],
-          ans: 0,
-          exp: 'Mitochondria generate most of the chemical energy (ATP) needed to power the cell’s biochemical reactions.',
-        },
-        bn: {
-          q: 'কোষীয় শ্বসনের মাধ্যমে ATP সংশ্লেষ করার জন্য কোন কোষ অঙ্গাণুকে কোষের শক্তিঘর (Powerhouse of the cell) বলা হয়?',
-          opts: ['মাইটোকনড্রিয়া', 'রাইবোজোম', 'গলগি বস্তু', 'লাইসোজোম'],
-          ans: 0,
-          exp: 'মাইটোকনড্রিয়া কোষীয় শ্বসনের মাধ্যমে ATP উৎপন্ন করে বলে একে কোষের শক্তিঘর বলা হয়।',
-        },
-        hi: {
-          q: 'कोशिकीय श्वसन के माध्यम से ATP का संश्लेषण करने के कारण किस कोशिकांग को कोशिका का ऊर्जागृह (Powerhouse) कहा जाता है?',
-          opts: ['माइटोकॉन्ड्रिया', 'राइबोसोम', 'गॉल्जीकाय', 'लाइसोसोम'],
-          ans: 0,
-          exp: 'माइटोकॉन्ड्रिया कोशिकीय श्वसन द्वारा ऊर्जा (ATP) का निर्माण करता है, इसलिए इसे कोशिका का पावरहाउस कहते हैं।',
-        },
-      },
-      {
-        key: 'photosynthesis_gas',
-        en: {
-          q: 'During photosynthesis in green plants, which gas is released into the atmosphere as a by-product of photolysis of water?',
-          opts: ['Oxygen (O₂)', 'Carbon dioxide (CO₂)', 'Nitrogen (N₂)', 'Hydrogen (H₂)'],
-          ans: 0,
-          exp: 'Oxygen is released during the light-dependent reactions of photosynthesis when water molecules are split.',
-        },
-        bn: {
-          q: 'সবুজ উদ্ভিদের সালোকসংশ্লেষ প্রক্রিয়ায় জলের আলোক-বিশ্লেষণের উপজাত পদার্থ হিসেবে কোন গ্যাস পরিবেশে নির্গত হয়?',
-          opts: ['অক্সিজেন (O₂)', 'কার্বন ডাইঅক্সাইড (CO₂)', 'নাইট্রোজেন (N₂)', 'হাইড্রোজেন (H₂)'],
-          ans: 0,
-          exp: 'সালোকসংশ্লেষের আলোক দশায় জলের ফটোলাইসিস ঘটে এবং উপজাত হিসেবে অক্সিজেন গ্যাস নির্গত হয়।',
-        },
-        hi: {
-          q: 'हरे पौधों में प्रकाश संश्लेषण के दौरान जल के प्रकाश-अपघटन के उप-उत्पाद के रूप में कौन सी गैस वायुमंडल में मुक्त होती है?',
-          opts: ['ऑक्सीजन (O₂)', 'कार्बन डाइऑक्साइड (CO₂)', 'नाइट्रोजन (N₂)', 'हाइड्रोजन (H₂)'],
-          ans: 0,
-          exp: 'प्रकाश संश्लेषण की प्रकाशीय अभिक्रिया में जल के अणुओं के टूटने से ऑक्सीजन (O₂) गैस मुक्त होती है।',
-        },
-      },
-      {
-        key: 'indian_constitution_enforcement_1950',
-        en: {
-          q: 'On which exact date did the Constitution of India come into full force, celebrated annually as Republic Day?',
-          opts: ['26 January 1950', '15 August 1947', '26 November 1949', '2 October 1950'],
-          ans: 0,
-          exp: 'The Constitution of India was adopted on 26 November 1949 and came into effect on 26 January 1950.',
-        },
-        bn: {
-          q: 'কোন ঐতিহাসিক তারিখে ভারতের সংবিধান সম্পূর্ণরূপে কার্যকর হয়েছিল, যা প্রতি বছর প্রজাতন্ত্র দিবস হিসেবে পালিত হয়?',
-          opts: ['২৬ জানুয়ারি ১৯৫০', '১৫ আগস্ট ১৯৪৭', '২৬ নভেম্বর ১৯৪৯', '২ অক্টোবর ১৯৫০'],
-          ans: 0,
-          exp: '১৯৪৯ সালের ২৬ নভেম্বর গৃহীত হওয়ার পর ১৯৫০ সালের ২৬ জানুয়ারি ভারতের সংবিধান কার্যকর হয়।',
-        },
-        hi: {
-          q: 'किस ऐतिहासिक तिथि को भारत का संविधान पूर्ण रूप से लागू हुआ, जिसे प्रतिवर्ष गणतंत्र दिवस के रूप में मनाया जाता है?',
-          opts: ['26 जनवरी 1950', '15 अगस्त 1947', '26 नवंबर 1949', '2 अक्टूबर 1950'],
-          ans: 0,
-          exp: 'भारतीय संविधान 26 नवंबर 1949 को अंगीकृत किया गया और 26 जनवरी 1950 को पूर्ण रूप से लागू हुआ।',
-        },
-      },
-      {
-        key: 'rabindranath_nobel_1913',
-        en: {
-          q: 'In which year was Rabindranath Tagore awarded the Nobel Prize in Literature for "Gitanjali"?',
-          opts: ['1913', '1905', '1921', '1930'],
-          ans: 0,
-          exp: 'Rabindranath Tagore became the first non-European Nobel laureate in Literature in 1913 for Song Offerings (Gitanjali).',
-        },
-        bn: {
-          q: 'রবীন্দ্রনাথ ঠাকুর কত খ্রিস্টাব্দে ‘গীতাঞ্জলি’ কাব্যগ্রন্থের জন্য সাহিত্যে নোবেল পুরস্কার লাভ করেন?',
-          opts: ['১৯১৩ খ্রিস্টাব্দে', '১৯০৫ খ্রিস্টাব্দে', '১৯২১ খ্রিস্টাব্দে', '১৯৩০ খ্রিস্টাব্দে'],
-          ans: 0,
-          exp: '১৯১৩ খ্রিস্টাব্দে রবীন্দ্রনাথ ঠাকুর প্রথম এশীয় হিসেবে সাহিত্যে নোবেল পুরস্কার পান।',
-        },
-        hi: {
-          q: 'रबीन्द्रनाथ टैगोर को "गीतांजलि" के लिए किस वर्ष साहित्य का नोबेल पुरस्कार प्रदान किया गया था?',
-          opts: ['1913', '1905', '1921', '1930'],
-          ans: 0,
-          exp: 'रबीन्द्रनाथ टैगोर को वर्ष 1913 में गीतांजलि के लिए साहित्य के नोबेल पुरस्कार से सम्मानित किया गया था।',
-        },
-      },
-      {
-        key: 'isro_chandrayaan3_2023',
-        en: {
-          q: 'On which date in August 2023 did ISRO’s Chandrayaan-3 Vikram lander successfully touch down near the lunar south pole?',
-          opts: ['23 August 2023', '14 July 2023', '2 September 2023', '15 August 2023'],
-          ans: 0,
-          exp: 'Chandrayaan-3 successfully soft-landed on the Moon on 23 August 2023, celebrated in India as National Space Day.',
-        },
-        bn: {
-          q: '২০২৩ সালের আগস্ট মাসের কোন তারিখে ইসরোর (ISRO) চন্দ্রযান-৩ সফলভাবে চাঁদের দক্ষিণ মেরুর কাছে অবতরণ করে?',
-          opts: ['২৩ আগস্ট ২০২৩', '১৪ জুলাই ২০২৩', '২ সেপ্টেম্বর ২০২৩', '১৫ আগস্ট ২০২৩'],
-          ans: 0,
-          exp: '২০২৩ সালের ২৩ আগস্ট চন্দ্রযান-৩ চাঁদের দক্ষিণ মেরুতে সফলভাবে অবতরণ করে, যা জাতীয় মহাকাশ দিবস হিসেবে ঘোষিত হয়েছে।',
-        },
-        hi: {
-          q: 'अगस्त 2023 में किस तिथि को इसरो (ISRO) के चंद्रयान-3 के विक्रम लैंडर ने चंद्रमा के दक्षिणी ध्रुव के पास सफलतापूर्वक लैंडिंग की?',
-          opts: ['23 अगस्त 2023', '14 जुलाई 2023', '2 सितंबर 2023', '15 अगस्त 2023'],
-          ans: 0,
-          exp: '23 अगस्त 2023 को चंद्रयान-3 ने चंद्रमा के दक्षिणी ध्रुव पर सफल सॉफ्ट लैंडिंग की, जिसे राष्ट्रीय अंतरिक्ष दिवस घोषित किया गया।',
-        },
-      },
-      {
-        key: 'xylem_water_transport',
-        en: {
-          q: 'Which vascular tissue in plants is responsible for the upward transport of water and dissolved minerals from roots to leaves?',
-          opts: ['Xylem', 'Phloem', 'Cambium', 'Epidermis'],
-          ans: 0,
-          exp: 'Xylem vessels and tracheids conduct water and minerals unidirectionally from the roots to aerial parts of the plant.',
-        },
-        bn: {
-          q: 'উদ্ভিদদেহে মূলরোম দ্বারা শোষিত জল ও খনিজ লবণ পাতায় পরিবহনের জন্য কোন সংবহন কলা দায়ী?',
-          opts: ['জাইলেম (Xylem)', 'ফ্লোয়েম (Phloem)', 'ক্যাম্বিয়াম', 'ত্বক কলা'],
-          ans: 0,
-          exp: 'জাইলেম কলার মাধ্যমে মূল দ্বারা শোষিত জল ও খনিজ লবণ ঊর্ধ্বমুখী সংবহনের মাধ্যমে পাতায় পৌঁছায়।',
-        },
-        hi: {
-          q: 'पौधों में जड़ों से पत्तियों तक जल और घुलित खनिजों के ऊर्ध्वमुखी परिवहन के लिए कौन सा संवहनी ऊतक उत्तरदायी है?',
-          opts: ['जाइलम (Xylem)', 'फ्लोएम (Phloem)', 'कैम्बियम', 'एपिडर्मिस'],
-          ans: 0,
-          exp: 'जाइलम ऊतक जड़ों द्वारा अवशोषित जल और खनिज लवणों को पौधे के विभिन्न भागों तक पहुंचाता है।',
-        },
-      },
-      {
-        key: 'sundarbans_unesco_1987',
-        en: {
-          q: 'In which year was the Sundarbans National Park in West Bengal inscribed as a UNESCO World Heritage Site?',
-          opts: ['1987', '1973', '1999', '1980'],
-          ans: 0,
-          exp: 'Sundarbans National Park in West Bengal was designated a UNESCO World Heritage Site in 1987.',
-        },
-        bn: {
-          q: 'পশ্চিমবঙ্গের সুন্দরবন জাতীয় উদ্যান কোন সালে ইউনেস্কো (UNESCO) ওয়ার্ল্ড হেরিটেজ সাইটের স্বীকৃতি পায়?',
-          opts: ['১৯৮৭ সালে', '১৯৭৩ সালে', '১৯৯৯ সালে', '১৯৮০ সালে'],
-          ans: 0,
-          exp: '১৯৮৭ সালে সুন্দরবন জাতীয় উদ্যান ইউনেস্কো বিশ্ব ঐতিহ্যবাহী স্থানের (World Heritage Site) মর্যাদা লাভ করে।',
-        },
-        hi: {
-          q: 'पश्चिम बंगाल के सुंदरबन राष्ट्रीय उद्यान को किस वर्ष यूनेस्को (UNESCO) विश्व धरोहर स्थल घोषित किया गया था?',
-          opts: ['1987', '1973', '1999', '1980'],
-          ans: 0,
-          exp: 'पश्चिम बंगाल स्थित सुंदरबन राष्ट्रीय उद्यान को 1987 में यूनेस्को विश्व धरोहर स्थल घोषित किया गया था।',
-        },
-      },
-      {
-        key: 'vitamin_c_scurvy',
-        en: {
-          q: 'Deficiency of which water-soluble vitamin in the human diet causes Scurvy (bleeding gums)?',
-          opts: ['Vitamin C (Ascorbic acid)', 'Vitamin A (Retinol)', 'Vitamin D (Calciferol)', 'Vitamin B₁ (Thiamine)'],
-          ans: 0,
-          exp: 'Scurvy is caused by a prolonged deficiency of Vitamin C (ascorbic acid), which is essential for collagen synthesis.',
-        },
-        bn: {
-          q: 'মানবদেহে জলে দ্রবণীয় কোন ভিটামিনের অভাবে স্কার্ভি (দাঁতের মাড়ি থেকে রক্তপাত) রোগ হয়?',
-          opts: ['ভিটামিন C (অ্যাসকরবিক অ্যাসিড)', 'ভিটামিন A (রেটিনল)', 'ভিটামিন D (ক্যালসিফেরল)', 'ভিটামিন B₁ (থায়ামিন)'],
-          ans: 0,
-          exp: 'ভিটামিন C বা অ্যাসকরবিক অ্যাসিডের অভাবে স্কার্ভি রোগ হয়।',
-        },
-        hi: {
-          q: 'मानव आहार में जल में घुलनशील किस विटामिन की कमी से स्कर्वी (मसूड़ों से खून आना) रोग होता है?',
-          opts: ['विटामिन C (एस्कॉर्बिक अम्ल)', 'विटामिन A (रेटिनॉल)', 'विटामिन D (कैल्सिफेरॉल)', 'विटामिन B₁ (थायमिन)'],
-          ans: 0,
-          exp: 'विटामिन C (एस्कॉर्बिक अम्ल) की कमी से स्कर्वी रोग होता है।',
-        },
-      },
-      {
-        key: 'eng_grammar_past_tense',
-        en: {
-          q: 'In English grammar, choose the correct form of the verb to complete: "Neither the teacher nor the students ___ present yesterday."',
-          opts: ['were', 'was', 'is', 'has been'],
-          ans: 0,
-          exp: 'With "Neither...nor", the verb agrees with the closer subject ("students", plural), and "yesterday" requires the past tense "were".',
-        },
-        bn: {
-          q: 'ইংরেজি ব্যাকরণের নিয়ম অনুযায়ী শূন্যস্থান পূরণ করো: "Neither the teacher nor the students ___ present yesterday."',
-          opts: ['were', 'was', 'is', 'has been'],
-          ans: 0,
-          exp: '"Neither...nor" থাকলে ক্রিয়াপদটি নিকটবর্তী কর্তা ("students", বহুবচন) এবং অতীত কাল ("yesterday") অনুযায়ী "were" হয়।',
-        },
-        hi: {
-          q: 'अंग्रेजी व्याकरण के अनुसार सही क्रिया चुनें: "Neither the teacher nor the students ___ present yesterday."',
-          opts: ['were', 'was', 'is', 'has been'],
-          ans: 0,
-          exp: '"Neither...nor" के साथ क्रिया নিকটतम कर्ता ("students", बहुवचन) और भूतकाल ("yesterday") के अनुसार "were" होगी।',
-        },
-      },
-      {
-        key: 'hindi_grammar_sandhi_vidyalaya',
-        en: {
-          q: 'Which type of Sandhi is formed in the word "Vidyalaya" (Vidya + Alaya)?',
-          opts: ['Dirgha Swar Sandhi', 'Guna Swar Sandhi', 'Vyanjan Sandhi', 'Visarga Sandhi'],
-          ans: 0,
-          exp: 'When two similar vowels (ā + ā = ā) combine to form a long vowel in Vidya + Alaya = Vidyalaya, it is Dirgha Swar Sandhi.',
-        },
-        bn: {
-          q: '‘বিদ্যালয়’ (বিদ্যা + আলয়) শব্দটিতে কোন প্রকার সন্ধি হয়েছে?',
-          opts: ['দীর্ঘ স্বরসন্ধি', 'গুণ স্বরসন্ধি', 'ব্যঞ্জনসন্ধি', 'বিসর্গসন্ধি'],
-          ans: 0,
-          exp: 'আ-কার + আ-কার = আ-কার (বিদ্যা + আলয় = বিদ্যালয়) হওয়ায় এটি স্বরসন্ধির অন্তর্গত দীর্ঘ স্বরসন্ধি।',
-        },
-        hi: {
-          q: '‘विद्यालय’ (विद्या + आलय) शब्द में कौन सी संधि है?',
-          opts: ['दीर्घ स्वर संधि', 'गुण स्वर संधि', 'व्यंजन संधि', 'विसर्ग संधि'],
-          ans: 0,
-          exp: 'समान स्वरों (आ + आ = आ) के मेल से दीर्घ स्वर बनने के कारण "विद्या + आलय = विद्यालय" में दीर्घ स्वर संधि है।',
-        },
-      },
-    ];
 
-    for (let i = 0; i < config.questionCount + 25; i++) {
-      const item = bankItems[i % bankItems.length];
-      addCandidate({
-        conceptKey: `${subj}_c${cls}_${item.key}_${i}`,
-        topic: config.topic || `Class ${cls} Core Curriculum`,
-        difficulty: i % 3 === 0 ? 'easy' : i % 3 === 1 ? 'medium' : 'hard',
-        questionType: 'mcq',
-        en: {
-          ...item.en,
-          q: i >= bankItems.length ? `[Class ${cls} Set #${i + 1}] ${item.en.q}` : item.en.q,
-        },
-        bn: {
-          ...item.bn,
-          q: i >= bankItems.length ? `[শ্রেণি ${cls} সেট #${i + 1}] ${item.bn.q}` : item.bn.q,
-        },
-        hi: {
-          ...item.hi,
-          q: i >= bankItems.length ? `[कक्षा ${cls} सेट #${i + 1}] ${item.hi.q}` : item.hi.q,
-        },
+      // Unique & verified! Add to working sets and accepted list
+      workingFingerprints.add(normalized.fingerprint);
+      comparisonPool.push({
+        fingerprint: normalized.fingerprint,
+        structuralHash: normalized.structuralHash,
+        conceptKey: normalized.conceptKey,
+        questionText: normalized.questionText,
+        options: normalized.options,
+        classLevel: normalized.classLevel,
+        subject: normalized.subject,
+        topic: normalized.topic,
+        difficulty: normalized.difficulty,
       });
+      acceptedQuestions.push(normalized);
+    }
+
+    if (acceptedQuestions.length >= questionCount) {
+      break;
     }
   }
 
-  return results;
+  return {
+    questions: acceptedQuestions,
+    modelUsed: resolvedModelName,
+    rejectedDuplicatesCount,
+  };
 }
 
-// Main Universal API Handler for Vercel Serverless Functions and Express
+// ============================================================================
+// MAIN UNIVERSAL SERVERLESS & EXPRESS API HANDLER
+// ============================================================================
+
 export default async function handler(req: any, res: any) {
   try {
     const method = String(req.method || 'GET').toUpperCase();
@@ -1267,7 +1381,7 @@ export default async function handler(req: any, res: any) {
       return;
     }
 
-    // 2. Generate Unique Quiz Endpoint
+    // 2. Generate Unique Quiz Endpoint (Dynamic Gemini AI + Multi-Layer Deduplication)
     if (method === 'POST' && routePath === '/api/quiz/generate') {
       const body = await readJsonBody(req);
       const {
@@ -1282,13 +1396,18 @@ export default async function handler(req: any, res: any) {
         mode = 'practice',
         userId = 'local_student',
         clientExcludedFingerprints = [],
+        clientExcludedHistory = [],
       } = body || {};
 
-      const rateKey = `${userId || 'anon'}_quiz`;
-      const limitCheck = checkRateLimit(rateKey);
-      if (!limitCheck.allowed) {
-        sendJson(res, 429, {
-          error: `Rate limit reached. Please wait ${limitCheck.retryAfterSeconds} seconds before generating another quiz.`,
+      const ai = getAiClient();
+      if (!ai) {
+        logServerError(
+          'Missing GEMINI_API_KEY in /api/quiz/generate',
+          new Error('GEMINI_API_KEY is not configured in server environment variables.')
+        );
+        sendJson(res, 503, {
+          error:
+            'Gemini AI API key is not configured on the server. Please add GEMINI_API_KEY in your Environment Variables and redeploy.',
         });
         return;
       }
@@ -1301,238 +1420,148 @@ export default async function handler(req: any, res: any) {
         : 8;
       const validQuizLang: 'en' | 'bn' | 'hi' =
         quizLanguage === 'bn' || quizLanguage === 'hi' ? quizLanguage : 'en';
+      const cleanUserId = String(userId || 'local_student');
 
-      const userHist = getUserHistory(String(userId));
+      // Merge server-side history with persistent client history (from Firestore + localStorage)
+      const serverHist = getUserServerHistory(cleanUserId);
+      const mergedHistoryMap = new Map<string, HistoryComparisonEntry>();
+
+      for (const item of serverHist) {
+        if (
+          item &&
+          item.fingerprint &&
+          (!item.classLevel || item.classLevel === validClass) &&
+          (!item.subject || item.subject === subject)
+        ) {
+          mergedHistoryMap.set(item.fingerprint, item);
+        }
+      }
+
+      if (Array.isArray(clientExcludedHistory)) {
+        for (const item of clientExcludedHistory) {
+          if (item && typeof item.questionText === 'string' && item.questionText.trim()) {
+            const fp =
+              typeof item.fingerprint === 'string' && item.fingerprint.trim()
+                ? item.fingerprint.trim()
+                : computeFingerprint(item.questionText);
+            const sHash =
+              typeof item.structuralHash === 'string' && item.structuralHash.trim()
+                ? item.structuralHash.trim()
+                : computeStructuralHash(item.questionText);
+            mergedHistoryMap.set(fp, {
+              fingerprint: fp,
+              structuralHash: sHash,
+              conceptKey: String(item.conceptKey || ''),
+              questionText: item.questionText.trim(),
+              options: Array.isArray(item.options) ? item.options.map(String) : undefined,
+              classLevel: Number(item.classLevel) || validClass,
+              subject: String(item.subject || subject),
+              topic: String(item.topic || topic),
+              difficulty: String(item.difficulty || difficulty),
+            });
+          }
+        }
+      }
+
+      const excludedFingerprintsSet = new Set<string>();
+      for (const item of serverHist) {
+        if (item.fingerprint) excludedFingerprintsSet.add(item.fingerprint);
+      }
       if (Array.isArray(clientExcludedFingerprints)) {
         for (const fp of clientExcludedFingerprints) {
-          if (typeof fp === 'string') userHist.fingerprints.add(fp);
-        }
-      }
-
-      const excludedFingerprintsSnapshot = new Set<string>(userHist.fingerprints);
-      const excludedConceptsSnapshot = new Set<string>(userHist.concepts);
-      const excludedHistoryCount = excludedFingerprintsSnapshot.size;
-
-      const validatedQuestions: ServerQuestion[] = [];
-      let usedGemini = false;
-      let resolvedModelName = ACTIVE_GEMINI_MODEL;
-      let notice: string | undefined;
-
-      const ai = getAiClient();
-      if (ai) {
-        try {
-          const langName =
-            validQuizLang === 'bn'
-              ? 'Bengali (বাংলা)'
-              : validQuizLang === 'hi'
-              ? 'Hindi (हिन्दी)'
-              : 'English';
-
-          const recentConcepts = Array.from(excludedConceptsSnapshot).slice(-30).join(', ');
-
-          const systemInstruction = `You are a senior academic curriculum examiner for West Bengal Board (WBBPE/WBBSE) Classes 5 to 10.
-CRITICAL RULES:
-1. Subject Independence: The academic subject being tested is "${subject}". The presentation language (Quiz Language) is "${langName}".
-2. Even if the subject is Bangla, English, or Hindi, you MUST write the question stem, instructions, and explanation in "${langName}" while testing the academic content of "${subject}" for Class ${validClass}.
-3. Every question must be 100% factually and mathematically accurate for Class ${validClass}.
-4. Do NOT repeat any of these previously tested concept keys: [${recentConcepts || 'none'}].
-5. Use different concepts, reasoning approaches, examples, numerical values, and plausible distractors.
-6. For General Knowledge (gk), include verifiable dates or authoritative sources in the question or explanation.
-7. For questionType "${questionType}": if "mcq", provide exactly 4 distinct options and correctIndex (0-3). If "tf", provide 2 options (True/False in ${langName}) and correctIndex (0 or 1). If "mixed", include both "mcq" and "tf" questions.`;
-
-          const prompt = `Generate exactly ${validCount} unique quiz questions for:
-- Class: Class ${validClass}
-- Subject: ${subject}
-- Topic/Chapter: ${topic}
-- Difficulty: ${difficulty}
-- Question Type: ${questionType}
-- Quiz Presentation Language: ${langName} (code: ${validQuizLang})
-- Unique Generation Seed: ${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
-
-          const { response, modelUsed } = await generateContentWithModelFallback(ai, {
-            contents: prompt,
-            config: {
-              systemInstruction,
-              temperature: 0.75,
-              responseMimeType: 'application/json',
-              responseSchema: {
-                type: Type.ARRAY,
-                items: {
-                  type: Type.OBJECT,
-                  properties: {
-                    questionText: {
-                      type: Type.STRING,
-                      description: `Full question text written in ${langName}`,
-                    },
-                    questionType: {
-                      type: Type.STRING,
-                      description: 'Either "mcq" or "tf"',
-                    },
-                    options: {
-                      type: Type.ARRAY,
-                      items: { type: Type.STRING },
-                      description: '4 distinct options for mcq, or 2 options for tf',
-                    },
-                    correctIndex: {
-                      type: Type.INTEGER,
-                      description: '0-based index of the single correct option',
-                    },
-                    explanation: {
-                      type: Type.STRING,
-                      description: `Step-by-step explanation of why the correct option is right, in ${langName}`,
-                    },
-                    hint: {
-                      type: Type.STRING,
-                      description: `Short helpful hint without giving away the answer, in ${langName}`,
-                    },
-                    topic: {
-                      type: Type.STRING,
-                      description: 'Specific chapter or subtopic name',
-                    },
-                    difficulty: {
-                      type: Type.STRING,
-                      description: 'easy, medium, or hard',
-                    },
-                    conceptKey: {
-                      type: Type.STRING,
-                      description:
-                        'Language-agnostic snake_case identifier of the core academic concept tested',
-                    },
-                  },
-                  required: [
-                    'questionText',
-                    'questionType',
-                    'options',
-                    'correctIndex',
-                    'explanation',
-                    'topic',
-                    'difficulty',
-                    'conceptKey',
-                  ],
-                },
-              },
-            },
-          });
-
-          resolvedModelName = modelUsed;
-          const parsed = parseGeminiJsonSafe(response?.text);
-          const candidateArray = Array.isArray(parsed)
-            ? parsed
-            : Array.isArray(parsed?.questions)
-            ? parsed.questions
-            : Array.isArray(parsed?.items)
-            ? parsed.items
-            : [];
-
-          if (candidateArray.length > 0) {
-            for (const item of candidateArray) {
-              if (validatedQuestions.length >= validCount) break;
-              const v = validateAndNormalizeQuestion(
-                item,
-                {
-                  classLevel: validClass,
-                  subject: String(subject),
-                  quizLanguage: validQuizLang,
-                  topic: String(topic),
-                  difficulty: String(difficulty),
-                },
-                validatedQuestions.length
-              );
-              if (
-                v &&
-                !excludedFingerprintsSnapshot.has(v.fingerprint) &&
-                !excludedConceptsSnapshot.has(v.conceptKey)
-              ) {
-                excludedFingerprintsSnapshot.add(v.fingerprint);
-                excludedConceptsSnapshot.add(v.conceptKey);
-                validatedQuestions.push(v);
-              }
-            }
-            if (validatedQuestions.length > 0) {
-              usedGemini = true;
-            }
+          if (typeof fp === 'string' && fp.trim()) {
+            excludedFingerprintsSet.add(fp.trim());
           }
-        } catch (aiErr: any) {
-          logServerError('Gemini quiz generation fallback triggered', aiErr, {
-            classLevel: validClass,
-            subject,
-            quizLanguage: validQuizLang,
-          });
-          notice =
-            'Gemini API quota or timeout reached; supplemented with curriculum-verified questions.';
         }
-      } else {
-        logServerError(
-          'GEMINI_API_KEY not found in environment',
-          new Error('Missing GEMINI_API_KEY environment variable')
-        );
-        notice =
-          'Generated using the built-in parameterized WBBSE/WBBPE curriculum engine (configure GEMINI_API_KEY in Vercel Environment Variables for live AI generation).';
       }
 
-      if (validatedQuestions.length < validCount) {
-        const needed = validCount - validatedQuestions.length;
-        const fallbackItems = generateVerifiedCurriculumQuestions(
-          {
+      const relevantHistory = Array.from(mergedHistoryMap.values());
+
+      try {
+        const { questions, modelUsed, rejectedDuplicatesCount } =
+          await generateFreshVerifiedQuizQuestions({
+            ai,
             classLevel: validClass,
             subject: String(subject),
             quizLanguage: validQuizLang,
             topic: String(topic),
             difficulty: String(difficulty),
-            questionCount: needed,
+            questionCount: validCount,
             questionType: String(questionType),
-          },
-          excludedFingerprintsSnapshot,
-          excludedConceptsSnapshot
-        );
-        for (const fb of fallbackItems) {
-          if (validatedQuestions.length >= validCount) break;
-          fb.id = `q_${validClass}_${subject}_${fb.fingerprint}_${validatedQuestions.length}`;
-          validatedQuestions.push(fb);
+            existingHistory: relevantHistory,
+            excludedFingerprints: excludedFingerprintsSet,
+          });
+
+        if (questions.length === 0) {
+          sendJson(res, 502, {
+            error:
+              'Gemini AI returned an empty or invalid question set. Please click Retry to generate a fresh quiz.',
+          });
+          return;
         }
-      }
 
-      for (const q of validatedQuestions) {
-        userHist.fingerprints.add(q.fingerprint);
-        userHist.concepts.add(q.conceptKey);
-      }
+        // Persist newly generated questions into server history for this user
+        recordQuestionsInServerHistory(cleanUserId, questions);
 
-      const attemptId = `att_${Date.now()}_${crypto.randomBytes(4).toString('hex')}`;
-      const attempt: ServerQuizAttempt = {
-        attemptId,
-        userId: String(userId),
-        config: {
+        const attemptId = `att_${Date.now()}_${crypto.randomBytes(4).toString('hex')}`;
+        const attempt: ServerQuizAttempt = {
+          attemptId,
+          userId: cleanUserId,
+          config: {
+            classLevel: validClass,
+            subject: String(subject),
+            quizLanguage: validQuizLang,
+            topic: String(topic),
+            difficulty: String(difficulty),
+            questionCount: questions.length,
+            questionType: String(questionType),
+            durationMinutes: Number(durationMinutes) || 0,
+            mode: mode === 'test' ? 'test' : 'practice',
+          },
+          questions,
+          lockedAnswers: {},
+          markedForReview: [],
+          status: 'in_progress',
+          startedAt: new Date().toISOString(),
+          timeTakenSeconds: 0,
+          generationInfo: {
+            model: modelUsed,
+            source: 'gemini-ai',
+            excludedHistoryCount: excludedFingerprintsSet.size,
+            uniqueConceptsCount: questions.length,
+            notice:
+              rejectedDuplicatesCount > 0
+                ? `Filtered ${rejectedDuplicatesCount} similar question(s) and generated fresh Gemini AI replacements.`
+                : undefined,
+          },
+        };
+
+        serverAttempts.set(attemptId, attempt);
+        console.info(
+          `[IQ Quiz Server] Fresh quiz generated | attemptId=${attemptId} | model=${modelUsed} | class=${validClass} | subject=${subject} | lang=${validQuizLang} | excludedHistory=${excludedFingerprintsSet.size} | rejectedSimilar=${rejectedDuplicatesCount}`
+        );
+        sendJson(res, 200, sanitizeAttemptForClient(attempt));
+        return;
+      } catch (aiErr: any) {
+        logServerError('Gemini quiz generation failed in /api/quiz/generate', aiErr, {
           classLevel: validClass,
-          subject: String(subject),
+          subject,
           quizLanguage: validQuizLang,
-          topic: String(topic),
-          difficulty: String(difficulty),
-          questionCount: validatedQuestions.length,
-          questionType: String(questionType),
-          durationMinutes: Number(durationMinutes) || 0,
-          mode: mode === 'test' ? 'test' : 'practice',
-        },
-        questions: validatedQuestions,
-        lockedAnswers: {},
-        markedForReview: [],
-        status: 'in_progress',
-        startedAt: new Date().toISOString(),
-        timeTakenSeconds: 0,
-        generationInfo: {
-          model: resolvedModelName,
-          source: usedGemini ? 'gemini-ai' : 'verified-curriculum-engine',
-          excludedHistoryCount,
-          uniqueConceptsCount: validatedQuestions.length,
-          notice,
-        },
-      };
-
-      serverAttempts.set(attemptId, attempt);
-      console.info(
-        `[IQ Quiz Server] Quiz created | attemptId=${attemptId} | model=${resolvedModelName} | source=${attempt.generationInfo.source} | class=${validClass} | subject=${subject} | lang=${validQuizLang}`
-      );
-      sendJson(res, 200, sanitizeAttemptForClient(attempt));
-      return;
+        });
+        const msg = String(aiErr?.message || aiErr || '').toLowerCase();
+        if (msg.includes('429') || msg.includes('resource_exhausted') || msg.includes('quota')) {
+          sendJson(res, 429, {
+            error:
+              'Gemini AI rate limit or quota reached. Please wait a few seconds and click Retry Quiz Generation.',
+          });
+          return;
+        }
+        sendJson(res, 503, {
+          error:
+            'Unable to reach Gemini AI right now to generate fresh questions. Please click Retry Quiz Generation.',
+        });
+        return;
+      }
     }
 
     // 3. Strict Irreversible Answer Locking Endpoint
@@ -1686,31 +1715,44 @@ CRITICAL RULES:
       return;
     }
 
-    // 7. Retake Quiz
+    // 7. Retake Quiz — Preserves original attempt while generating a 100% FRESH Gemini quiz for the new attempt
     if (method === 'POST' && routePath === '/api/quiz/retake') {
       const body = await readJsonBody(req);
       const {
         originalAttemptId,
         originalConfig,
-        originalQuestions,
+        originalQuestions = [],
         serverStateToken,
         quizLanguage,
         userId = 'local_student',
+        clientExcludedFingerprints = [],
+        clientExcludedHistory = [],
       } = body || {};
+
+      const ai = getAiClient();
+      if (!ai) {
+        sendJson(res, 503, {
+          error:
+            'Gemini AI API key is not configured on the server. Please add GEMINI_API_KEY in your Environment Variables.',
+        });
+        return;
+      }
 
       const memOriginal =
         resolveServerAttempt(originalAttemptId, serverStateToken) ||
         serverAttempts.get(originalAttemptId);
 
-      if (!memOriginal && (!originalConfig || !Array.isArray(originalQuestions))) {
-        sendJson(res, 404, { error: 'Original attempt not found on server.' });
+      if (!memOriginal && !originalConfig) {
+        sendJson(res, 404, { error: 'Original attempt configuration not found.' });
         return;
       }
 
       const baseConfig = memOriginal ? memOriginal.config : originalConfig;
-      const baseQuestions: ServerQuestion[] = memOriginal
+      const baseQuestions: any[] = memOriginal
         ? memOriginal.questions
-        : originalQuestions;
+        : Array.isArray(originalQuestions)
+        ? originalQuestions
+        : [];
       const baseAttemptId = memOriginal
         ? memOriginal.attemptId
         : String(originalAttemptId || 'prev');
@@ -1718,145 +1760,149 @@ CRITICAL RULES:
       const targetLang: 'en' | 'bn' | 'hi' =
         quizLanguage === 'bn' || quizLanguage === 'hi' || quizLanguage === 'en'
           ? quizLanguage
-          : baseConfig.quizLanguage;
+          : baseConfig.quizLanguage || 'en';
 
-      let retakeQuestions: ServerQuestion[] = [];
-      let resolvedModelName = ACTIVE_GEMINI_MODEL;
+      const validClass = [5, 6, 7, 8, 9, 10].includes(Number(baseConfig.classLevel))
+        ? Number(baseConfig.classLevel)
+        : 8;
+      const validCount = [5, 10, 15, 20, 30].includes(Number(baseConfig.questionCount))
+        ? Number(baseConfig.questionCount)
+        : Math.max(5, baseQuestions.length || 5);
+      const cleanUserId = String(userId || 'local_student');
 
-      if (targetLang === baseConfig.quizLanguage && memOriginal) {
-        retakeQuestions = baseQuestions.map((q) => ({
-          ...q,
-          options: [...q.options],
-        }));
-      } else {
-        const ai = getAiClient();
-        if (ai) {
-          try {
-            const langName =
-              targetLang === 'bn'
-                ? 'Bengali (বাংলা)'
-                : targetLang === 'hi'
-                ? 'Hindi (हिन्दी)'
-                : 'English';
+      // Build exclusion history including all questions from the original attempt + persistent history
+      const serverHist = getUserServerHistory(cleanUserId);
+      const mergedHistoryMap = new Map<string, HistoryComparisonEntry>();
 
-            const { response, modelUsed } = await generateContentWithModelFallback(ai, {
-              contents: `Translate and adapt the following Class ${baseConfig.classLevel} (${baseConfig.subject}) quiz questions into ${langName} (language code: ${targetLang}). Keep the exact same academic concepts, options order, and correctIndex:\n${JSON.stringify(
-                baseQuestions.map((q) => ({
-                  questionText: q.questionText,
-                  questionType: q.questionType,
-                  options: q.options,
-                  correctIndex: typeof q.correctIndex === 'number' ? q.correctIndex : 0,
-                  explanation: q.explanation,
-                  hint: q.hint,
-                  topic: q.topic,
-                  difficulty: q.difficulty,
-                  conceptKey: q.conceptKey,
-                }))
-              )}`,
-              config: {
-                responseMimeType: 'application/json',
-                responseSchema: {
-                  type: Type.ARRAY,
-                  items: {
-                    type: Type.OBJECT,
-                    properties: {
-                      questionText: { type: Type.STRING },
-                      questionType: { type: Type.STRING },
-                      options: { type: Type.ARRAY, items: { type: Type.STRING } },
-                      correctIndex: { type: Type.INTEGER },
-                      explanation: { type: Type.STRING },
-                      hint: { type: Type.STRING },
-                      topic: { type: Type.STRING },
-                      difficulty: { type: Type.STRING },
-                      conceptKey: { type: Type.STRING },
-                    },
-                    required: [
-                      'questionText',
-                      'questionType',
-                      'options',
-                      'correctIndex',
-                      'explanation',
-                      'topic',
-                      'difficulty',
-                      'conceptKey',
-                    ],
-                  },
-                },
-              },
-            });
-            resolvedModelName = modelUsed;
-            const parsed = parseGeminiJsonSafe(response?.text);
-            const candidateArray = Array.isArray(parsed)
-              ? parsed
-              : Array.isArray(parsed?.questions)
-              ? parsed.questions
-              : [];
-            for (let i = 0; i < candidateArray.length; i++) {
-              const v = validateAndNormalizeQuestion(
-                candidateArray[i],
-                {
-                  classLevel: baseConfig.classLevel,
-                  subject: baseConfig.subject,
-                  quizLanguage: targetLang,
-                  topic: baseConfig.topic,
-                  difficulty: baseConfig.difficulty,
-                },
-                i
-              );
-              if (v) retakeQuestions.push(v);
-            }
-          } catch (err) {
-            logServerError('Retake language adaptation fallback', err);
-          }
-        }
-
-        if (retakeQuestions.length < baseQuestions.length) {
-          const needed = baseQuestions.length - retakeQuestions.length;
-          const fb = generateVerifiedCurriculumQuestions(
-            {
-              classLevel: baseConfig.classLevel,
-              subject: baseConfig.subject,
-              quizLanguage: targetLang,
-              topic: baseConfig.topic,
-              difficulty: baseConfig.difficulty,
-              questionCount: needed,
-              questionType: baseConfig.questionType,
-            },
-            new Set(),
-            new Set()
-          );
-          retakeQuestions.push(...fb.slice(0, needed));
+      for (const item of serverHist) {
+        if (
+          item &&
+          item.fingerprint &&
+          (!item.classLevel || item.classLevel === validClass) &&
+          (!item.subject || item.subject === baseConfig.subject)
+        ) {
+          mergedHistoryMap.set(item.fingerprint, item);
         }
       }
 
-      const newAttemptId = `att_${Date.now()}_${crypto.randomBytes(4).toString('hex')}`;
-      const newAttempt: ServerQuizAttempt = {
-        attemptId: newAttemptId,
-        parentAttemptId: baseAttemptId,
-        userId: String(userId),
-        config: {
-          ...baseConfig,
-          quizLanguage: targetLang,
-          questionCount: retakeQuestions.length,
-        },
-        questions: retakeQuestions,
-        lockedAnswers: {},
-        markedForReview: [],
-        status: 'in_progress',
-        startedAt: new Date().toISOString(),
-        timeTakenSeconds: 0,
-        generationInfo: {
-          model: resolvedModelName,
-          source: memOriginal?.generationInfo?.source || 'verified-curriculum-engine',
-          excludedHistoryCount: memOriginal?.generationInfo?.excludedHistoryCount || 0,
-          uniqueConceptsCount: retakeQuestions.length,
-          notice: `Retake of Attempt ${baseAttemptId.slice(-6)} in ${targetLang.toUpperCase()} — New independent Attempt ID created.`,
-        },
-      };
+      for (const oq of baseQuestions) {
+        if (oq && typeof oq.questionText === 'string') {
+          const fp = oq.fingerprint || computeFingerprint(oq.questionText);
+          mergedHistoryMap.set(fp, {
+            fingerprint: fp,
+            structuralHash: oq.structuralHash || computeStructuralHash(oq.questionText),
+            conceptKey: String(oq.conceptKey || ''),
+            questionText: oq.questionText,
+            options: Array.isArray(oq.options) ? oq.options : undefined,
+            classLevel: validClass,
+            subject: String(baseConfig.subject),
+            topic: String(oq.topic || baseConfig.topic),
+            difficulty: String(oq.difficulty || baseConfig.difficulty),
+          });
+        }
+      }
 
-      serverAttempts.set(newAttemptId, newAttempt);
-      sendJson(res, 200, sanitizeAttemptForClient(newAttempt));
-      return;
+      if (Array.isArray(clientExcludedHistory)) {
+        for (const item of clientExcludedHistory) {
+          if (item && typeof item.questionText === 'string' && item.questionText.trim()) {
+            const fp =
+              typeof item.fingerprint === 'string' && item.fingerprint.trim()
+                ? item.fingerprint.trim()
+                : computeFingerprint(item.questionText);
+            mergedHistoryMap.set(fp, {
+              fingerprint: fp,
+              structuralHash:
+                typeof item.structuralHash === 'string' && item.structuralHash.trim()
+                  ? item.structuralHash.trim()
+                  : computeStructuralHash(item.questionText),
+              conceptKey: String(item.conceptKey || ''),
+              questionText: item.questionText.trim(),
+              options: Array.isArray(item.options) ? item.options.map(String) : undefined,
+              classLevel: Number(item.classLevel) || validClass,
+              subject: String(item.subject || baseConfig.subject),
+              topic: String(item.topic || baseConfig.topic),
+              difficulty: String(item.difficulty || baseConfig.difficulty),
+            });
+          }
+        }
+      }
+
+      const excludedFingerprintsSet = new Set<string>(mergedHistoryMap.keys());
+      if (Array.isArray(clientExcludedFingerprints)) {
+        for (const fp of clientExcludedFingerprints) {
+          if (typeof fp === 'string' && fp.trim()) excludedFingerprintsSet.add(fp.trim());
+        }
+      }
+
+      try {
+        const { questions: retakeQuestions, modelUsed } =
+          await generateFreshVerifiedQuizQuestions({
+            ai,
+            classLevel: validClass,
+            subject: String(baseConfig.subject),
+            quizLanguage: targetLang,
+            topic: String(baseConfig.topic || 'All Verified Chapters'),
+            difficulty: String(baseConfig.difficulty || 'mixed'),
+            questionCount: validCount,
+            questionType: String(baseConfig.questionType || 'mcq'),
+            existingHistory: Array.from(mergedHistoryMap.values()),
+            excludedFingerprints: excludedFingerprintsSet,
+          });
+
+        if (retakeQuestions.length === 0) {
+          sendJson(res, 502, {
+            error: 'Gemini AI did not return valid questions for the retake. Please retry.',
+          });
+          return;
+        }
+
+        recordQuestionsInServerHistory(cleanUserId, retakeQuestions);
+
+        const newAttemptId = `att_${Date.now()}_${crypto.randomBytes(4).toString('hex')}`;
+        const newAttempt: ServerQuizAttempt = {
+          attemptId: newAttemptId,
+          parentAttemptId: baseAttemptId,
+          userId: cleanUserId,
+          config: {
+            ...baseConfig,
+            classLevel: validClass,
+            quizLanguage: targetLang,
+            questionCount: retakeQuestions.length,
+          },
+          questions: retakeQuestions,
+          lockedAnswers: {},
+          markedForReview: [],
+          status: 'in_progress',
+          startedAt: new Date().toISOString(),
+          timeTakenSeconds: 0,
+          generationInfo: {
+            model: modelUsed,
+            source: 'gemini-ai',
+            excludedHistoryCount: excludedFingerprintsSet.size,
+            uniqueConceptsCount: retakeQuestions.length,
+            notice: `Fresh Retake of Attempt ${baseAttemptId.slice(-6)} in ${targetLang.toUpperCase()} — Brand-new questions generated.`,
+          },
+        };
+
+        serverAttempts.set(newAttemptId, newAttempt);
+        sendJson(res, 200, sanitizeAttemptForClient(newAttempt));
+        return;
+      } catch (aiErr: any) {
+        logServerError('Gemini retake generation failed in /api/quiz/retake', aiErr);
+        const msg = String(aiErr?.message || aiErr || '').toLowerCase();
+        if (msg.includes('429') || msg.includes('resource_exhausted') || msg.includes('quota')) {
+          sendJson(res, 429, {
+            error:
+              'Gemini AI rate limit reached. Please wait a few seconds and click Retry Quiz Generation.',
+          });
+          return;
+        }
+        sendJson(res, 503, {
+          error:
+            'Unable to reach Gemini AI to generate fresh retake questions. Please click Retry.',
+        });
+        return;
+      }
     }
 
     // 8. Launch Interactive Locked Quiz from Study Note MCQs
@@ -1900,6 +1946,8 @@ CRITICAL RULES:
         return;
       }
 
+      recordQuestionsInServerHistory(String(userId), validated);
+
       const attemptId = `att_notes_${Date.now()}_${crypto.randomBytes(3).toString('hex')}`;
       const attempt: ServerQuizAttempt = {
         attemptId,
@@ -1939,8 +1987,7 @@ CRITICAL RULES:
     if (method === 'POST' && routePath === '/api/quiz/reset-history') {
       const body = await readJsonBody(req);
       const { userId = 'local_student' } = body || {};
-      userFingerprintsHistory.delete(String(userId));
-      userConceptHistory.delete(String(userId));
+      userHistoryStore.delete(String(userId));
       sendJson(res, 200, { reset: true });
       return;
     }
@@ -1956,21 +2003,20 @@ CRITICAL RULES:
         subject = 'life_science',
         inputLanguage = 'en',
         outputLanguage = 'en',
-        userId = 'local_student',
       } = body || {};
-
-      const rateKey = `${userId || 'anon'}_notes`;
-      const limitCheck = checkRateLimit(rateKey);
-      if (!limitCheck.allowed) {
-        sendJson(res, 429, {
-          error: `Rate limit reached. Please wait ${limitCheck.retryAfterSeconds} seconds.`,
-        });
-        return;
-      }
 
       if ((!sourceText || String(sourceText).trim().length < 10) && !fileData?.base64) {
         sendJson(res, 400, {
           error: 'Please provide study notes text or upload a supported document.',
+        });
+        return;
+      }
+
+      const ai = getAiClient();
+      if (!ai) {
+        sendJson(res, 503, {
+          error:
+            'Gemini AI API key is not configured on the server. Please add GEMINI_API_KEY in your Environment Variables.',
         });
         return;
       }
@@ -1989,179 +2035,138 @@ CRITICAL RULES:
           ? 'Hindi (हिन्दी)'
           : 'English';
 
-      const ai = getAiClient();
-      if (ai) {
-        try {
-          const parts: any[] = [];
-          if (fileData?.base64 && fileData?.mimeType) {
-            parts.push({
-              inlineData: {
-                mimeType: fileData.mimeType,
-                data: fileData.base64,
-              },
-            });
-          }
+      try {
+        const parts: any[] = [];
+        if (fileData?.base64 && fileData?.mimeType) {
           parts.push({
-            text: `Analyze the following Class ${classLevel} (${subject}) study notes (Input Language: ${inLangName}) and produce a complete revision package in ${outLangName} (Output Language code: ${outputLanguage}).
+            inlineData: {
+              mimeType: fileData.mimeType,
+              data: fileData.base64,
+            },
+          });
+        }
+        parts.push({
+          text: `Analyze the following Class ${classLevel} (${subject}) study notes (Input Language: ${inLangName}) and produce a complete revision package in ${outLangName} (Output Language code: ${outputLanguage}).
 Title: ${title}
 Notes Content:
 ${String(sourceText).slice(0, 18000)}`,
-          });
+        });
 
-          const { response, modelUsed } = await generateContentWithModelFallback(ai, {
-            contents: { parts },
-            config: {
-              systemInstruction: `You are an expert tutor for Class ${classLevel} students.
-Regardless of the input note language (${inLangName}), write all output fields (summary, keyConcepts, flashcards, and 5 MCQs) strictly in ${outLangName}.
+        const { response, modelUsed } = await generateContentWithModelFallback(ai, {
+          contents: { parts },
+          config: {
+            systemInstruction: `You are an expert tutor for Class ${classLevel} students.
+Regardless of the input note language (${inLangName}), write all output fields (summary, keyConcepts, flashcards, and 5 unique MCQs) strictly in ${outLangName}.
 Make explanations clear, student-friendly, and factually accurate.`,
-              responseMimeType: 'application/json',
-              responseSchema: {
-                type: Type.OBJECT,
-                properties: {
-                  title: { type: Type.STRING },
-                  summary: {
-                    type: Type.STRING,
-                    description: `Clear, simple-language summary in ${outLangName}`,
-                  },
-                  keyConcepts: {
-                    type: Type.ARRAY,
-                    items: {
-                      type: Type.OBJECT,
-                      properties: {
-                        term: { type: Type.STRING },
-                        explanation: { type: Type.STRING },
-                        example: { type: Type.STRING },
-                      },
-                      required: ['term', 'explanation', 'example'],
+            responseMimeType: 'application/json',
+            responseSchema: {
+              type: Type.OBJECT,
+              properties: {
+                title: { type: Type.STRING },
+                summary: {
+                  type: Type.STRING,
+                  description: `Clear, simple-language summary in ${outLangName}`,
+                },
+                keyConcepts: {
+                  type: Type.ARRAY,
+                  items: {
+                    type: Type.OBJECT,
+                    properties: {
+                      term: { type: Type.STRING },
+                      explanation: { type: Type.STRING },
+                      example: { type: Type.STRING },
                     },
-                  },
-                  flashcards: {
-                    type: Type.ARRAY,
-                    items: {
-                      type: Type.OBJECT,
-                      properties: {
-                        front: { type: Type.STRING },
-                        back: { type: Type.STRING },
-                      },
-                      required: ['front', 'back'],
-                    },
-                  },
-                  mcqs: {
-                    type: Type.ARRAY,
-                    items: {
-                      type: Type.OBJECT,
-                      properties: {
-                        questionText: { type: Type.STRING },
-                        options: {
-                          type: Type.ARRAY,
-                          items: { type: Type.STRING },
-                        },
-                        correctIndex: { type: Type.INTEGER },
-                        explanation: { type: Type.STRING },
-                        topic: { type: Type.STRING },
-                        difficulty: { type: Type.STRING },
-                      },
-                      required: [
-                        'questionText',
-                        'options',
-                        'correctIndex',
-                        'explanation',
-                        'topic',
-                        'difficulty',
-                      ],
-                    },
+                    required: ['term', 'explanation', 'example'],
                   },
                 },
-                required: ['title', 'summary', 'keyConcepts', 'flashcards', 'mcqs'],
+                flashcards: {
+                  type: Type.ARRAY,
+                  items: {
+                    type: Type.OBJECT,
+                    properties: {
+                      front: { type: Type.STRING },
+                      back: { type: Type.STRING },
+                    },
+                    required: ['front', 'back'],
+                  },
+                },
+                mcqs: {
+                  type: Type.ARRAY,
+                  items: {
+                    type: Type.OBJECT,
+                    properties: {
+                      questionText: { type: Type.STRING },
+                      options: {
+                        type: Type.ARRAY,
+                        items: { type: Type.STRING },
+                      },
+                      correctIndex: { type: Type.INTEGER },
+                      explanation: { type: Type.STRING },
+                      topic: { type: Type.STRING },
+                      difficulty: { type: Type.STRING },
+                    },
+                    required: [
+                      'questionText',
+                      'options',
+                      'correctIndex',
+                      'explanation',
+                      'topic',
+                      'difficulty',
+                    ],
+                  },
+                },
               },
+              required: ['title', 'summary', 'keyConcepts', 'flashcards', 'mcqs'],
             },
-          });
-
-          const parsed = parseGeminiJsonSafe(response?.text);
-          if (parsed && typeof parsed === 'object' && typeof parsed.summary === 'string') {
-            const cleanMcqs = (Array.isArray(parsed.mcqs) ? parsed.mcqs : [])
-              .map((m: any, idx: number) => ({
-                id: `note_mcq_${Date.now()}_${idx}`,
-                questionText: String(m.questionText || ''),
-                options: Array.isArray(m.options) ? m.options.slice(0, 4).map(String) : [],
-                correctIndex:
-                  Number.isInteger(m.correctIndex) && m.correctIndex >= 0 && m.correctIndex < 4
-                    ? m.correctIndex
-                    : 0,
-                explanation: String(m.explanation || ''),
-                topic: String(m.topic || title),
-                difficulty:
-                  m.difficulty === 'easy' || m.difficulty === 'hard' ? m.difficulty : 'medium',
-              }))
-              .filter((m: any) => m.questionText.length > 3 && m.options.length === 4);
-
-            sendJson(res, 200, {
-              title: parsed.title || title,
-              summary: parsed.summary || '',
-              keyConcepts: Array.isArray(parsed.keyConcepts) ? parsed.keyConcepts : [],
-              flashcards: Array.isArray(parsed.flashcards) ? parsed.flashcards : [],
-              mcqs: cleanMcqs,
-              modelUsed,
-            });
-            return;
-          }
-        } catch (aiErr: any) {
-          logServerError('Gemini study notes fallback', aiErr);
-        }
-      }
-
-      const sentences = String(sourceText || title)
-        .split(/[.।?!\n]+/)
-        .map((s: string) => s.trim())
-        .filter((s: string) => s.length > 10);
-
-      const fallbackQuestions = generateVerifiedCurriculumQuestions(
-        {
-          classLevel: Number(classLevel) || 8,
-          subject: String(subject),
-          quizLanguage: outputLanguage === 'bn' || outputLanguage === 'hi' ? outputLanguage : 'en',
-          topic: String(title),
-          difficulty: 'mixed',
-          questionCount: 5,
-          questionType: 'mcq',
-        },
-        new Set(),
-        new Set()
-      );
-
-      sendJson(res, 200, {
-        title: title || 'Study Revision Note',
-        summary:
-          sentences.slice(0, 4).join('. ') ||
-          'Structured summary prepared from your study notes.',
-        keyConcepts: [
-          {
-            term: title || `Class ${classLevel} Core Concept`,
-            explanation:
-              sentences[0] ||
-              'Fundamental principle highlighted in your uploaded study passage.',
-            example:
-              sentences[1] || 'Applied in standard WBBSE/WBBPE classroom exercises.',
           },
-        ],
-        flashcards: fallbackQuestions.slice(0, 4).map((q) => ({
-          front: q.questionText,
-          back: `${q.options[q.correctIndex]} — ${q.explanation}`,
-        })),
-        mcqs: fallbackQuestions.map((q) => ({
-          id: q.id,
-          questionText: q.questionText,
-          options: q.options,
-          correctIndex: q.correctIndex,
-          explanation: q.explanation,
-          topic: q.topic,
-          difficulty: q.difficulty,
-        })),
-        modelUsed: `${ACTIVE_GEMINI_MODEL} (Structured Local Fallback)`,
-        notice:
-          'Generated using structured text extraction because Gemini API quota was temporarily unavailable.',
-      });
-      return;
+        });
+
+        const parsed = parseGeminiJsonSafe(response?.text);
+        if (parsed && typeof parsed === 'object' && typeof parsed.summary === 'string') {
+          const cleanMcqs = (Array.isArray(parsed.mcqs) ? parsed.mcqs : [])
+            .map((m: any, idx: number) => ({
+              id: `note_mcq_${Date.now()}_${idx}`,
+              questionText: String(m.questionText || ''),
+              options: Array.isArray(m.options) ? m.options.slice(0, 4).map(String) : [],
+              correctIndex:
+                Number.isInteger(m.correctIndex) && m.correctIndex >= 0 && m.correctIndex < 4
+                  ? m.correctIndex
+                  : 0,
+              explanation: String(m.explanation || ''),
+              topic: String(m.topic || title),
+              difficulty:
+                m.difficulty === 'easy' || m.difficulty === 'hard' ? m.difficulty : 'medium',
+            }))
+            .filter((m: any) => m.questionText.length > 3 && m.options.length === 4);
+
+          sendJson(res, 200, {
+            title: parsed.title || title,
+            summary: parsed.summary || '',
+            keyConcepts: Array.isArray(parsed.keyConcepts) ? parsed.keyConcepts : [],
+            flashcards: Array.isArray(parsed.flashcards) ? parsed.flashcards : [],
+            mcqs: cleanMcqs,
+            modelUsed,
+          });
+          return;
+        }
+        sendJson(res, 502, {
+          error: 'Gemini AI returned an incomplete study notes analysis. Please retry.',
+        });
+        return;
+      } catch (aiErr: any) {
+        logServerError('Gemini study notes processing failed', aiErr);
+        const msg = String(aiErr?.message || aiErr || '').toLowerCase();
+        if (msg.includes('429') || msg.includes('resource_exhausted') || msg.includes('quota')) {
+          sendJson(res, 429, {
+            error: 'Gemini AI rate limit reached. Please wait a few seconds and retry.',
+          });
+          return;
+        }
+        sendJson(res, 503, {
+          error: 'Unable to process study notes with Gemini AI right now. Please retry.',
+        });
+        return;
+      }
     }
 
     sendJson(res, 404, {

@@ -288,6 +288,110 @@
         "createdAt",
         "updatedAt"
       ]
+    },
+    "QuestionHistory": {
+      "title": "QuestionHistory",
+      "description": "Stores previously generated question text, normalized fingerprints, structural hashes, and concept keys per user to prevent duplicate or semantically similar questions across sessions and deployments.",
+      "type": "object",
+      "properties": {
+        "historyId": {
+          "type": "string",
+          "description": "Unique question history record ID",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "userId": {
+          "type": "string",
+          "description": "Owner UID of the student",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "classLevel": {
+          "type": "integer",
+          "description": "Class level (5-10)",
+          "enum": [5, 6, 7, 8, 9, 10]
+        },
+        "subject": {
+          "type": "string",
+          "description": "Subject identifier",
+          "enum": [
+            "bangla",
+            "english",
+            "mathematics",
+            "hindi",
+            "physical_science",
+            "life_science",
+            "gk"
+          ],
+          "minLength": 2,
+          "maxLength": 40
+        },
+        "topic": {
+          "type": "string",
+          "description": "Topic or chapter of the generated question",
+          "minLength": 1,
+          "maxLength": 160
+        },
+        "difficulty": {
+          "type": "string",
+          "description": "Difficulty level of the generated question",
+          "enum": ["easy", "medium", "hard", "mixed"],
+          "minLength": 4,
+          "maxLength": 10
+        },
+        "language": {
+          "type": "string",
+          "description": "Language of the generated question",
+          "enum": ["en", "bn", "hi"],
+          "minLength": 2,
+          "maxLength": 5
+        },
+        "fingerprint": {
+          "type": "string",
+          "description": "Normalized text SHA-256 fingerprint",
+          "minLength": 6,
+          "maxLength": 64
+        },
+        "structuralHash": {
+          "type": "string",
+          "description": "Number-masked structural skeleton hash for semantic similarity detection",
+          "minLength": 6,
+          "maxLength": 64
+        },
+        "conceptKey": {
+          "type": "string",
+          "description": "Normalized academic concept identifier",
+          "minLength": 2,
+          "maxLength": 120
+        },
+        "questionText": {
+          "type": "string",
+          "description": "Full question stem text for semantic similarity comparison",
+          "minLength": 3,
+          "maxLength": 2000
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Creation server timestamp"
+        }
+      },
+      "required": [
+        "historyId",
+        "userId",
+        "classLevel",
+        "subject",
+        "topic",
+        "difficulty",
+        "language",
+        "fingerprint",
+        "structuralHash",
+        "conceptKey",
+        "questionText",
+        "createdAt"
+      ]
     }
   },
   "firestore": {
@@ -302,6 +406,10 @@
     "/studyNotes/{noteId}": {
       "schema": { "$ref": "#/entities/StudyNote" },
       "description": "Stores saved study notes, summaries, and revision guides."
+    },
+    "/questionHistory/{historyId}": {
+      "schema": { "$ref": "#/entities/QuestionHistory" },
+      "description": "Stores persistent question fingerprints, question stems, and semantic similarity signatures per user."
     }
   }
 }

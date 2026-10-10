@@ -43,6 +43,7 @@ export interface QuizConfig {
 export interface QuizQuestionClient {
   id: string;
   fingerprint: string;
+  structuralHash?: string;
   conceptKey: string;
   classLevel: ClassLevel;
   subject: SubjectId;
@@ -56,6 +57,22 @@ export interface QuizQuestionClient {
   // Only populated after locking in Practice Mode or after final submission in Test Mode
   correctIndex?: number;
   explanation?: string;
+}
+
+export interface QuestionHistoryRecord {
+  historyId: string;
+  userId: string;
+  classLevel: ClassLevel;
+  subject: SubjectId;
+  topic: string;
+  difficulty: string;
+  language: LanguageCode;
+  fingerprint: string;
+  structuralHash: string;
+  conceptKey: string;
+  questionText: string;
+  options?: string[];
+  createdAt: string;
 }
 
 export interface LockedAnswerRecord {

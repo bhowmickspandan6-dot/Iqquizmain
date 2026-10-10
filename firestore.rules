@@ -182,6 +182,52 @@ service cloud.firestore {
         data.updatedAt is timestamp;
     }
 
+    // Blueprint Validation Helper: QuestionHistory
+    function isValidQuestionHistory(data) {
+      return data.keys().hasAll([
+          'historyId',
+          'userId',
+          'classLevel',
+          'subject',
+          'topic',
+          'difficulty',
+          'language',
+          'fingerprint',
+          'structuralHash',
+          'conceptKey',
+          'questionText',
+          'createdAt'
+        ]) &&
+        data.keys().hasOnly([
+          'historyId',
+          'userId',
+          'classLevel',
+          'subject',
+          'topic',
+          'difficulty',
+          'language',
+          'fingerprint',
+          'structuralHash',
+          'conceptKey',
+          'questionText',
+          'createdAt'
+        ]) &&
+        isValidId(data.historyId) &&
+        isValidId(data.userId) &&
+        data.userId == request.auth.uid &&
+        isValidClassLevel(data.classLevel) &&
+        isValidSubject(data.subject) &&
+        data.topic is string && data.topic.size() >= 1 && data.topic.size() <= 160 &&
+        data.difficulty is string && data.difficulty.size() >= 4 && data.difficulty.size() <= 10 &&
+        (data.difficulty == 'easy' || data.difficulty == 'medium' || data.difficulty == 'hard' || data.difficulty == 'mixed') &&
+        isValidLanguage(data.language) &&
+        data.fingerprint is string && data.fingerprint.size() >= 6 && data.fingerprint.size() <= 64 &&
+        data.structuralHash is string && data.structuralHash.size() >= 6 && data.structuralHash.size() <= 64 &&
+        data.conceptKey is string && data.conceptKey.size() >= 2 && data.conceptKey.size() <= 120 &&
+        data.questionText is string && data.questionText.size() >= 3 && data.questionText.size() <= 2000 &&
+        data.createdAt is timestamp;
+    }
+
     // Collection: /users/{userId}
     match /users/{userId} {
       allow get: if isSignedIn() && isValidId(userId) && request.auth.uid == userId;
@@ -196,6 +242,7 @@ service cloud.firestore {
         incoming().updatedAt == request.time;
 
       allow update: if isSignedIn() &&
+        isSignedIn() &&
         isValidId(userId) &&
         request.auth.uid == userId &&
         isValidUserProfile(incoming()) &&
@@ -287,6 +334,21 @@ service cloud.firestore {
         ]);
 
       allow delete: if isSignedIn() && isValidId(noteId) && existing().userId == request.auth.uid;
+    }
+
+    // Collection: /questionHistory/{historyId}
+    match /questionHistory/{historyId} {
+      allow get: if isSignedIn() && isValidId(historyId) && existing().userId == request.auth.uid;
+      allow list: if isSignedIn() && existing().userId == request.auth.uid;
+
+      allow create: if isSignedIn() &&
+        isValidId(historyId) &&
+        isValidQuestionHistory(incoming()) &&
+        incoming().historyId == historyId &&
+        incoming().createdAt == request.time;
+
+      allow update: if false;
+      allow delete: if isSignedIn() && isValidId(historyId) && existing().userId == request.auth.uid;
     }
   }
 }
