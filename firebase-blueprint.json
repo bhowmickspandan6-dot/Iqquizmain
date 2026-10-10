@@ -1,0 +1,307 @@
+{
+  "entities": {
+    "UserProfile": {
+      "title": "UserProfile",
+      "description": "Stores a student's preferences, selected class, interface language, and preferred quiz language.",
+      "type": "object",
+      "properties": {
+        "uid": {
+          "type": "string",
+          "description": "Unique user identifier matching request.auth.uid",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "displayName": {
+          "type": "string",
+          "description": "Student display name",
+          "minLength": 1,
+          "maxLength": 100
+        },
+        "selectedClass": {
+          "type": "integer",
+          "description": "Selected academic class from 5 to 10",
+          "enum": [5, 6, 7, 8, 9, 10]
+        },
+        "interfaceLanguage": {
+          "type": "string",
+          "description": "Selected UI language code",
+          "enum": ["en", "bn", "hi"],
+          "minLength": 2,
+          "maxLength": 5
+        },
+        "quizLanguage": {
+          "type": "string",
+          "description": "Preferred independent quiz language code",
+          "enum": ["en", "bn", "hi"],
+          "minLength": 2,
+          "maxLength": 5
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Server timestamp of profile creation"
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Server timestamp of last profile update"
+        }
+      },
+      "required": [
+        "uid",
+        "displayName",
+        "selectedClass",
+        "interfaceLanguage",
+        "quizLanguage",
+        "createdAt",
+        "updatedAt"
+      ]
+    },
+    "QuizAttempt": {
+      "title": "QuizAttempt",
+      "description": "Stores a student's quiz attempt, configuration, permanently locked answer count, and final score.",
+      "type": "object",
+      "properties": {
+        "attemptId": {
+          "type": "string",
+          "description": "Unique quiz attempt ID",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "userId": {
+          "type": "string",
+          "description": "Owner UID of the student taking the quiz",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "classLevel": {
+          "type": "integer",
+          "description": "Class level (5-10)",
+          "enum": [5, 6, 7, 8, 9, 10]
+        },
+        "subject": {
+          "type": "string",
+          "description": "Independent academic subject identifier",
+          "enum": [
+            "bangla",
+            "english",
+            "mathematics",
+            "hindi",
+            "physical_science",
+            "life_science",
+            "gk"
+          ],
+          "minLength": 2,
+          "maxLength": 40
+        },
+        "quizLanguage": {
+          "type": "string",
+          "description": "Language in which the quiz was generated",
+          "enum": ["en", "bn", "hi"],
+          "minLength": 2,
+          "maxLength": 5
+        },
+        "topic": {
+          "type": "string",
+          "description": "Chapter or topic tested",
+          "minLength": 1,
+          "maxLength": 160
+        },
+        "difficulty": {
+          "type": "string",
+          "description": "Difficulty setting",
+          "enum": ["easy", "medium", "hard", "mixed"],
+          "minLength": 4,
+          "maxLength": 10
+        },
+        "mode": {
+          "type": "string",
+          "description": "Practice or Test mode",
+          "enum": ["practice", "test"],
+          "minLength": 4,
+          "maxLength": 10
+        },
+        "totalQuestions": {
+          "type": "integer",
+          "description": "Total number of questions in the quiz"
+        },
+        "correctCount": {
+          "type": "integer",
+          "description": "Number of locked correct answers"
+        },
+        "incorrectCount": {
+          "type": "integer",
+          "description": "Number of locked incorrect answers"
+        },
+        "unansweredCount": {
+          "type": "integer",
+          "description": "Number of unanswered questions"
+        },
+        "scorePercentage": {
+          "type": "integer",
+          "description": "Final percentage score (0-100)"
+        },
+        "timeTakenSeconds": {
+          "type": "integer",
+          "description": "Total seconds spent on the attempt"
+        },
+        "status": {
+          "type": "string",
+          "description": "Attempt status (in_progress or completed)",
+          "enum": ["in_progress", "completed"],
+          "minLength": 9,
+          "maxLength": 15
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Server timestamp when attempt started"
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Server timestamp when attempt was last updated"
+        }
+      },
+      "required": [
+        "attemptId",
+        "userId",
+        "classLevel",
+        "subject",
+        "quizLanguage",
+        "topic",
+        "difficulty",
+        "mode",
+        "totalQuestions",
+        "correctCount",
+        "incorrectCount",
+        "unansweredCount",
+        "scorePercentage",
+        "timeTakenSeconds",
+        "status",
+        "createdAt",
+        "updatedAt"
+      ]
+    },
+    "StudyNote": {
+      "title": "StudyNote",
+      "description": "Stores a student's study note, AI summary, and revision guide.",
+      "type": "object",
+      "properties": {
+        "noteId": {
+          "type": "string",
+          "description": "Unique study note ID",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "userId": {
+          "type": "string",
+          "description": "Owner UID of the student",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "title": {
+          "type": "string",
+          "description": "Note title",
+          "minLength": 1,
+          "maxLength": 200
+        },
+        "classLevel": {
+          "type": "integer",
+          "description": "Class level (5-10)",
+          "enum": [5, 6, 7, 8, 9, 10]
+        },
+        "subject": {
+          "type": "string",
+          "description": "Subject identifier",
+          "enum": [
+            "bangla",
+            "english",
+            "mathematics",
+            "hindi",
+            "physical_science",
+            "life_science",
+            "gk"
+          ],
+          "minLength": 2,
+          "maxLength": 40
+        },
+        "inputLanguage": {
+          "type": "string",
+          "description": "Source note language",
+          "enum": ["en", "bn", "hi"],
+          "minLength": 2,
+          "maxLength": 5
+        },
+        "outputLanguage": {
+          "type": "string",
+          "description": "Generated summary language",
+          "enum": ["en", "bn", "hi"],
+          "minLength": 2,
+          "maxLength": 5
+        },
+        "sourceText": {
+          "type": "string",
+          "description": "Original study note content",
+          "minLength": 1,
+          "maxLength": 20000
+        },
+        "summary": {
+          "type": "string",
+          "description": "AI generated simple summary",
+          "minLength": 1,
+          "maxLength": 15000
+        },
+        "revisionGuide": {
+          "type": "string",
+          "description": "Formatted key concepts and flashcards text",
+          "minLength": 1,
+          "maxLength": 25000
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Creation server timestamp"
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Update server timestamp"
+        }
+      },
+      "required": [
+        "noteId",
+        "userId",
+        "title",
+        "classLevel",
+        "subject",
+        "inputLanguage",
+        "outputLanguage",
+        "sourceText",
+        "summary",
+        "revisionGuide",
+        "createdAt",
+        "updatedAt"
+      ]
+    }
+  },
+  "firestore": {
+    "/users/{userId}": {
+      "schema": { "$ref": "#/entities/UserProfile" },
+      "description": "Stores individual student preferences, class, interface language, and quiz language."
+    },
+    "/quizAttempts/{attemptId}": {
+      "schema": { "$ref": "#/entities/QuizAttempt" },
+      "description": "Stores quiz attempts, locked answer counts, and final scores for each student."
+    },
+    "/studyNotes/{noteId}": {
+      "schema": { "$ref": "#/entities/StudyNote" },
+      "description": "Stores saved study notes, summaries, and revision guides."
+    }
+  }
+}

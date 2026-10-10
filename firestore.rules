@@ -1,0 +1,292 @@
+rules_version = '2';
+
+service cloud.firestore {
+  match /databases/{database}/documents {
+    // 1. Global Safety Net: Default-Deny Catch-All
+    match /{document=**} {
+      allow read, write: if false;
+    }
+
+    // Reusable Hardened Global Helpers
+    function isValidId(id) {
+      return id is string && id.size() >= 1 && id.size() <= 128 && id.matches('^[a-zA-Z0-9_\\-]+$');
+    }
+
+    function incoming() {
+      return request.resource.data;
+    }
+
+    function existing() {
+      return resource.data;
+    }
+
+    function isSignedIn() {
+      return request.auth != null && request.auth.token.email_verified == true;
+    }
+
+    function isValidLanguage(lang) {
+      return lang is string && lang.size() >= 2 && lang.size() <= 5 && (lang == 'en' || lang == 'bn' || lang == 'hi');
+    }
+
+    function isValidClassLevel(cls) {
+      return cls is int && cls >= 5 && cls <= 10;
+    }
+
+    function isValidSubject(sub) {
+      return sub is string && sub.size() >= 2 && sub.size() <= 40 && (
+        sub == 'bangla' ||
+        sub == 'english' ||
+        sub == 'mathematics' ||
+        sub == 'hindi' ||
+        sub == 'physical_science' ||
+        sub == 'life_science' ||
+        sub == 'gk'
+      );
+    }
+
+    // Blueprint Validation Helper: UserProfile
+    function isValidUserProfile(data) {
+      return data.keys().hasAll([
+          'uid',
+          'displayName',
+          'selectedClass',
+          'interfaceLanguage',
+          'quizLanguage',
+          'createdAt',
+          'updatedAt'
+        ]) &&
+        data.keys().hasOnly([
+          'uid',
+          'displayName',
+          'selectedClass',
+          'interfaceLanguage',
+          'quizLanguage',
+          'createdAt',
+          'updatedAt'
+        ]) &&
+        isValidId(data.uid) &&
+        data.uid == request.auth.uid &&
+        data.displayName is string && data.displayName.size() >= 1 && data.displayName.size() <= 100 &&
+        isValidClassLevel(data.selectedClass) &&
+        isValidLanguage(data.interfaceLanguage) &&
+        isValidLanguage(data.quizLanguage) &&
+        data.createdAt is timestamp &&
+        data.updatedAt is timestamp;
+    }
+
+    // Blueprint Validation Helper: QuizAttempt
+    function isValidQuizAttempt(data) {
+      return data.keys().hasAll([
+          'attemptId',
+          'userId',
+          'classLevel',
+          'subject',
+          'quizLanguage',
+          'topic',
+          'difficulty',
+          'mode',
+          'totalQuestions',
+          'correctCount',
+          'incorrectCount',
+          'unansweredCount',
+          'scorePercentage',
+          'timeTakenSeconds',
+          'status',
+          'createdAt',
+          'updatedAt'
+        ]) &&
+        data.keys().hasOnly([
+          'attemptId',
+          'userId',
+          'classLevel',
+          'subject',
+          'quizLanguage',
+          'topic',
+          'difficulty',
+          'mode',
+          'totalQuestions',
+          'correctCount',
+          'incorrectCount',
+          'unansweredCount',
+          'scorePercentage',
+          'timeTakenSeconds',
+          'status',
+          'createdAt',
+          'updatedAt'
+        ]) &&
+        isValidId(data.attemptId) &&
+        isValidId(data.userId) &&
+        data.userId == request.auth.uid &&
+        isValidClassLevel(data.classLevel) &&
+        isValidSubject(data.subject) &&
+        isValidLanguage(data.quizLanguage) &&
+        data.topic is string && data.topic.size() >= 1 && data.topic.size() <= 160 &&
+        data.difficulty is string && data.difficulty.size() >= 4 && data.difficulty.size() <= 10 &&
+        (data.difficulty == 'easy' || data.difficulty == 'medium' || data.difficulty == 'hard' || data.difficulty == 'mixed') &&
+        data.mode is string && data.mode.size() >= 4 && data.mode.size() <= 10 &&
+        (data.mode == 'practice' || data.mode == 'test') &&
+        data.totalQuestions is int && data.totalQuestions >= 1 && data.totalQuestions <= 50 &&
+        data.correctCount is int && data.correctCount >= 0 && data.correctCount <= data.totalQuestions &&
+        data.incorrectCount is int && data.incorrectCount >= 0 && data.incorrectCount <= data.totalQuestions &&
+        data.unansweredCount is int && data.unansweredCount >= 0 && data.unansweredCount <= data.totalQuestions &&
+        data.scorePercentage is int && data.scorePercentage >= 0 && data.scorePercentage <= 100 &&
+        data.timeTakenSeconds is int && data.timeTakenSeconds >= 0 && data.timeTakenSeconds <= 86400 &&
+        data.status is string && data.status.size() >= 9 && data.status.size() <= 15 &&
+        (data.status == 'in_progress' || data.status == 'completed') &&
+        data.createdAt is timestamp &&
+        data.updatedAt is timestamp;
+    }
+
+    // Blueprint Validation Helper: StudyNote
+    function isValidStudyNote(data) {
+      return data.keys().hasAll([
+          'noteId',
+          'userId',
+          'title',
+          'classLevel',
+          'subject',
+          'inputLanguage',
+          'outputLanguage',
+          'sourceText',
+          'summary',
+          'revisionGuide',
+          'createdAt',
+          'updatedAt'
+        ]) &&
+        data.keys().hasOnly([
+          'noteId',
+          'userId',
+          'title',
+          'classLevel',
+          'subject',
+          'inputLanguage',
+          'outputLanguage',
+          'sourceText',
+          'summary',
+          'revisionGuide',
+          'createdAt',
+          'updatedAt'
+        ]) &&
+        isValidId(data.noteId) &&
+        isValidId(data.userId) &&
+        data.userId == request.auth.uid &&
+        data.title is string && data.title.size() >= 1 && data.title.size() <= 200 &&
+        isValidClassLevel(data.classLevel) &&
+        isValidSubject(data.subject) &&
+        isValidLanguage(data.inputLanguage) &&
+        isValidLanguage(data.outputLanguage) &&
+        data.sourceText is string && data.sourceText.size() >= 1 && data.sourceText.size() <= 20000 &&
+        data.summary is string && data.summary.size() >= 1 && data.summary.size() <= 15000 &&
+        data.revisionGuide is string && data.revisionGuide.size() >= 1 && data.revisionGuide.size() <= 25000 &&
+        data.createdAt is timestamp &&
+        data.updatedAt is timestamp;
+    }
+
+    // Collection: /users/{userId}
+    match /users/{userId} {
+      allow get: if isSignedIn() && isValidId(userId) && request.auth.uid == userId;
+      allow list: if false;
+
+      allow create: if isSignedIn() &&
+        isValidId(userId) &&
+        request.auth.uid == userId &&
+        isValidUserProfile(incoming()) &&
+        incoming().uid == userId &&
+        incoming().createdAt == request.time &&
+        incoming().updatedAt == request.time;
+
+      allow update: if isSignedIn() &&
+        isValidId(userId) &&
+        request.auth.uid == userId &&
+        isValidUserProfile(incoming()) &&
+        incoming().uid == existing().uid &&
+        incoming().createdAt == existing().createdAt &&
+        incoming().updatedAt == request.time &&
+        incoming().diff(existing()).affectedKeys().hasOnly([
+          'displayName',
+          'selectedClass',
+          'interfaceLanguage',
+          'quizLanguage',
+          'updatedAt'
+        ]);
+
+      allow delete: if false;
+    }
+
+    // Collection: /quizAttempts/{attemptId}
+    match /quizAttempts/{attemptId} {
+      allow get: if isSignedIn() && isValidId(attemptId) && existing().userId == request.auth.uid;
+      allow list: if isSignedIn() && existing().userId == request.auth.uid;
+
+      allow create: if isSignedIn() &&
+        isValidId(attemptId) &&
+        isValidQuizAttempt(incoming()) &&
+        incoming().attemptId == attemptId &&
+        incoming().createdAt == request.time &&
+        incoming().updatedAt == request.time &&
+        exists(/databases/$(database)/documents/users/$(request.auth.uid));
+
+      // Action-Based Update with Terminal State Locking:
+      // Once existing().status == 'completed', NO further updates are allowed!
+      allow update: if isSignedIn() &&
+        isValidId(attemptId) &&
+        isValidQuizAttempt(incoming()) &&
+        existing().userId == request.auth.uid &&
+        incoming().userId == existing().userId &&
+        incoming().attemptId == existing().attemptId &&
+        incoming().classLevel == existing().classLevel &&
+        incoming().subject == existing().subject &&
+        incoming().quizLanguage == existing().quizLanguage &&
+        incoming().topic == existing().topic &&
+        incoming().difficulty == existing().difficulty &&
+        incoming().mode == existing().mode &&
+        incoming().totalQuestions == existing().totalQuestions &&
+        incoming().createdAt == existing().createdAt &&
+        incoming().updatedAt == request.time &&
+        existing().status != 'completed' &&
+        incoming().diff(existing()).affectedKeys().hasOnly([
+          'correctCount',
+          'incorrectCount',
+          'unansweredCount',
+          'scorePercentage',
+          'timeTakenSeconds',
+          'status',
+          'updatedAt'
+        ]);
+
+      allow delete: if false;
+    }
+
+    // Collection: /studyNotes/{noteId}
+    match /studyNotes/{noteId} {
+      allow get: if isSignedIn() && isValidId(noteId) && existing().userId == request.auth.uid;
+      allow list: if isSignedIn() && existing().userId == request.auth.uid;
+
+      allow create: if isSignedIn() &&
+        isValidId(noteId) &&
+        isValidStudyNote(incoming()) &&
+        incoming().noteId == noteId &&
+        incoming().createdAt == request.time &&
+        incoming().updatedAt == request.time &&
+        exists(/databases/$(database)/documents/users/$(request.auth.uid));
+
+      allow update: if isSignedIn() &&
+        isValidId(noteId) &&
+        isValidStudyNote(incoming()) &&
+        existing().userId == request.auth.uid &&
+        incoming().userId == existing().userId &&
+        incoming().noteId == existing().noteId &&
+        incoming().createdAt == existing().createdAt &&
+        incoming().updatedAt == request.time &&
+        incoming().diff(existing()).affectedKeys().hasOnly([
+          'title',
+          'outputLanguage',
+          'summary',
+          'revisionGuide',
+          'updatedAt'
+        ]);
+
+      allow delete: if isSignedIn() && isValidId(noteId) && existing().userId == request.auth.uid;
+    }
+  }
+}

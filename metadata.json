@@ -1,0 +1,6 @@
+{
+  "name": "IQ Quiz",
+  "description": "IQ Quiz — Learn Better. Practice Smarter. Professional AI-powered study, quiz, and exam preparation platform for Classes 5–10 across seven subjects in English, Bengali, and Hindi.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
