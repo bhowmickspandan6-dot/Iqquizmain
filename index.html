@@ -2,7 +2,54 @@
 <html lang="en">
   <head>
     <meta charset="UTF-8" />
-    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta
+      id="app-viewport"
+      name="viewport"
+      content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no"
+    />
+    <script>
+      (function () {
+        try {
+          var ua = navigator.userAgent || '';
+          var uaDataMobile =
+            navigator.userAgentData && typeof navigator.userAgentData.mobile === 'boolean'
+              ? navigator.userAgentData.mobile
+              : null;
+          var isMobileUA =
+            uaDataMobile !== null
+              ? uaDataMobile
+              : /Android.*Mobile|iPhone|iPod|BlackBerry|IEMobile|Opera Mini/i.test(ua);
+          var screenShortSide = Math.min(
+            window.screen ? window.screen.width : 1024,
+            window.screen ? window.screen.height : 768
+          );
+          var isTouchCompactScreen =
+            (navigator.maxTouchPoints || 0) > 0 && screenShortSide > 0 && screenShortSide < 768;
+          var isDesktopMode = !isMobileUA || window.innerWidth >= 768;
+          var meta = document.getElementById('app-viewport');
+
+          if (isDesktopMode) {
+            document.documentElement.setAttribute('data-layout-mode', 'desktop');
+            if (meta) {
+              meta.setAttribute(
+                'content',
+                isTouchCompactScreen
+                  ? 'width=1200, user-scalable=yes, minimum-scale=0.2, maximum-scale=5.0'
+                  : 'width=device-width, initial-scale=1.0, user-scalable=yes, minimum-scale=0.25, maximum-scale=5.0'
+              );
+            }
+          } else {
+            document.documentElement.setAttribute('data-layout-mode', 'mobile');
+            if (meta) {
+              meta.setAttribute(
+                'content',
+                'width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no'
+              );
+            }
+          }
+        } catch (e) {}
+      })();
+    </script>
     <title>IQ Quiz — Learn Better. Practice Smarter.</title>
     <meta name="description" content="IQ Quiz — Learn Better. Practice Smarter. Professional AI-powered study, quiz, and exam preparation platform for Classes 5–10 across seven subjects in English, Bengali, and Hindi." />
     <meta property="og:title" content="IQ Quiz — Learn Better. Practice Smarter." />

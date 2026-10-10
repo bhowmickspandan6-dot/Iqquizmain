@@ -896,9 +896,86 @@ export default function App() {
       : `IQ Quiz — ${t(interfaceLanguage, 'tagline')}`;
   }, [activeNav, interfaceLanguage]);
 
-  // Global protection against text selection, copying, and Android/mobile long-press text-selection popups
-  // while keeping inputs, textareas, dropdowns, buttons, scrolling, and accessibility fully functional
+  // Global protection against text selection, copying, and Android/mobile long-press text-selection popups,
+  // plus conditional pinch-to-zoom control (disabled in normal mobile layout, enabled in Chrome Desktop Site / desktop layout)
   useEffect(() => {
+    const detectDesktopLayoutMode = (): {
+      isDesktopMode: boolean;
+      isTouchCompactScreen: boolean;
+    } => {
+      const ua = navigator.userAgent || '';
+      const navAny = navigator as any;
+      const uaDataMobile =
+        navAny.userAgentData && typeof navAny.userAgentData.mobile === 'boolean'
+          ? navAny.userAgentData.mobile
+          : null;
+      const isMobileUA =
+        uaDataMobile !== null
+          ? uaDataMobile
+          : /Android.*Mobile|iPhone|iPod|BlackBerry|IEMobile|Opera Mini/i.test(ua);
+
+      const screenShortSide = Math.min(
+        window.screen?.width || 1024,
+        window.screen?.height || 768
+      );
+      const isTouchCompactScreen =
+        (navigator.maxTouchPoints || 0) > 0 && screenShortSide > 0 && screenShortSide < 768;
+
+      const layoutWidth = Math.max(
+        document.documentElement?.clientWidth || 0,
+        window.innerWidth || 0
+      );
+
+      // Desktop mode is active when the browser uses a Desktop User-Agent (e.g. Chrome "Desktop site" enabled)
+      // OR when the layout viewport width is desktop/tablet sized (>= 768px)
+      const isDesktopMode = !isMobileUA || layoutWidth >= 768;
+      return { isDesktopMode, isTouchCompactScreen };
+    };
+
+    const syncViewportAndZoomMode = () => {
+      const { isDesktopMode, isTouchCompactScreen } = detectDesktopLayoutMode();
+      const targetMode = isDesktopMode ? 'desktop' : 'mobile';
+      if (document.documentElement.getAttribute('data-layout-mode') !== targetMode) {
+        document.documentElement.setAttribute('data-layout-mode', targetMode);
+      }
+
+      let meta = document.getElementById('app-viewport') as HTMLMetaElement | null;
+      if (!meta) {
+        meta = document.querySelector('meta[name="viewport"]') as HTMLMetaElement | null;
+      }
+      if (meta) {
+        const desiredContent = isDesktopMode
+          ? isTouchCompactScreen
+            ? 'width=1200, user-scalable=yes, minimum-scale=0.2, maximum-scale=5.0'
+            : 'width=device-width, initial-scale=1.0, user-scalable=yes, minimum-scale=0.25, maximum-scale=5.0'
+          : 'width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no';
+
+        if (meta.getAttribute('content') !== desiredContent) {
+          meta.setAttribute('content', desiredContent);
+        }
+      }
+    };
+
+    syncViewportAndZoomMode();
+
+    const isMobileZoomLocked = (): boolean => {
+      return document.documentElement.getAttribute('data-layout-mode') === 'mobile';
+    };
+
+    // In normal mobile layout only: block multi-finger pinch-to-zoom while keeping 1-finger scrolling untouched
+    const handleTouchMove = (e: TouchEvent) => {
+      if (isMobileZoomLocked() && e.touches && e.touches.length > 1) {
+        e.preventDefault();
+      }
+    };
+
+    // WebKit gesture events: block only in normal mobile layout
+    const handleGestureEvent = (e: Event) => {
+      if (isMobileZoomLocked()) {
+        e.preventDefault();
+      }
+    };
+
     const isEditableFormTarget = (node: EventTarget | Node | null): boolean => {
       if (!node) return false;
       const el =
@@ -953,6 +1030,12 @@ export default function App() {
       }
     };
 
+    window.addEventListener('resize', syncViewportAndZoomMode);
+    window.addEventListener('orientationchange', syncViewportAndZoomMode);
+    document.addEventListener('touchmove', handleTouchMove, { passive: false });
+    document.addEventListener('gesturestart', handleGestureEvent, { passive: false } as AddEventListenerOptions);
+    document.addEventListener('gesturechange', handleGestureEvent, { passive: false } as AddEventListenerOptions);
+    document.addEventListener('gestureend', handleGestureEvent, { passive: false } as AddEventListenerOptions);
     document.addEventListener('selectstart', handleSelectStart);
     document.addEventListener('contextmenu', handleContextMenu);
     document.addEventListener('copy', handleCopyOrCut);
@@ -961,6 +1044,12 @@ export default function App() {
     document.addEventListener('selectionchange', handleSelectionChange);
 
     return () => {
+      window.removeEventListener('resize', syncViewportAndZoomMode);
+      window.removeEventListener('orientationchange', syncViewportAndZoomMode);
+      document.removeEventListener('touchmove', handleTouchMove);
+      document.removeEventListener('gesturestart', handleGestureEvent);
+      document.removeEventListener('gesturechange', handleGestureEvent);
+      document.removeEventListener('gestureend', handleGestureEvent);
       document.removeEventListener('selectstart', handleSelectStart);
       document.removeEventListener('contextmenu', handleContextMenu);
       document.removeEventListener('copy', handleCopyOrCut);

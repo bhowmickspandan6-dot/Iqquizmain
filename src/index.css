@@ -57,11 +57,27 @@
     font-variant-numeric: tabular-nums;
   }
 
-  /* Global smooth interactive button & control feedback */
-  button,
-  a,
-  label,
-  [role="button"] {
+  /* In normal mobile layout: allow 1-finger scrolling & taps, disable pinch-to-zoom */
+  html[data-layout-mode="mobile"],
+  html[data-layout-mode="mobile"] body,
+  html[data-layout-mode="mobile"] #root,
+  html[data-layout-mode="mobile"] *,
+  html[data-layout-mode="mobile"] *::before,
+  html[data-layout-mode="mobile"] *::after {
+    touch-action: pan-x pan-y;
+  }
+
+  /* In desktop layout / Chrome Desktop Site mode: allow normal browser pinch-to-zoom & scaling */
+  html[data-layout-mode="desktop"],
+  html[data-layout-mode="desktop"] body,
+  html[data-layout-mode="desktop"] #root {
+    touch-action: auto;
+  }
+
+  html[data-layout-mode="desktop"] button,
+  html[data-layout-mode="desktop"] a,
+  html[data-layout-mode="desktop"] label,
+  html[data-layout-mode="desktop"] [role="button"] {
     touch-action: manipulation;
   }
 
