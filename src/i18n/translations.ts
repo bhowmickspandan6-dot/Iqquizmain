@@ -211,7 +211,17 @@ export const UI_TRANSLATIONS: Record<LanguageCode, Record<string, string>> = {
     randomQuizSub: 'Start a surprise curriculum quiz for your selected class.',
     langModalTitle: 'Select Quiz Mode & Language',
     langModalSubtitle:
-      'Choose your preferred quiz mode and language before starting. Questions and timer will begin only when you click Start Quiz.',
+      'Choose your preferred quiz mode and language step by step before starting.',
+    stepBadge1Of2: 'Step 1 of 2 · Quiz Mode',
+    stepBadge2Of2: 'Step 2 of 2 · Quiz Language',
+    step1Title: 'Step 1: Select Quiz Mode',
+    step1Subtitle:
+      'Choose Practice Mode, Timed Mode, Exam Mode, or Challenge Mode, then click Continue.',
+    step2Title: 'Step 2: Select Quiz Language',
+    step2Subtitle:
+      'Choose your preferred language for this quiz, then click Start Quiz to generate questions.',
+    stepContinueBtn: 'Continue',
+    stepBackBtn: 'Back',
     langModalExplicitNote:
       'Once the quiz starts, the selected mode cannot be changed until your next quiz.',
     langCardEnDesc: 'Complete quiz, options, hints & explanations in English',
@@ -416,7 +426,17 @@ export const UI_TRANSLATIONS: Record<LanguageCode, Record<string, string>> = {
     randomQuizSub: 'আপনার নির্বাচিত শ্রেণির জন্য একটি তাৎক্ষণিক পাঠ্যক্রম কুইজ শুরু করুন।',
     langModalTitle: 'কুইজের মোড ও ভাষা নির্বাচন করুন',
     langModalSubtitle:
-      'কুইজ শুরু করার আগে আপনার পছন্দের মোড এবং ভাষা নির্বাচন করুন। "কুইজ শুরু করুন" ক্লিক করলেই প্রশ্ন তৈরি ও টাইমার শুরু হবে।',
+      'কুইজ শুরু করার আগে ধাপে ধাপে আপনার পছন্দের মোড এবং ভাষা নির্বাচন করুন।',
+    stepBadge1Of2: 'ধাপ ১ / ২ · কুইজ মোড',
+    stepBadge2Of2: 'ধাপ ২ / ২ · কুইজের ভাষা',
+    step1Title: 'ধাপ ১: কুইজ মোড নির্বাচন করুন',
+    step1Subtitle:
+      'প্র্যাকটিস মোড, টাইমড মোড, এক্সাম মোড বা চ্যালেঞ্জ মোড বেছে নিয়ে "এগিয়ে যান (Continue)" ক্লিক করুন।',
+    step2Title: 'ধাপ ২: কুইজের ভাষা নির্বাচন করুন',
+    step2Subtitle:
+      'এই কুইজের জন্য আপনার পছন্দের ভাষা বেছে নিন এবং কুইজ তৈরি করতে "কুইজ শুরু করুন" ক্লিক করুন।',
+    stepContinueBtn: 'এগিয়ে যান (Continue)',
+    stepBackBtn: 'পেছনে যান (Back)',
     langModalExplicitNote:
       'কুইজ শুরু হয়ে গেলে এই প্রচেষ্টার জন্য মোড পরিবর্তন করা যাবে না; পরবর্তী কুইজের জন্য আবার নির্বাচন করতে পারবেন।',
     langCardEnDesc: 'Complete quiz, options, hints & explanations in English',
@@ -621,7 +641,17 @@ export const UI_TRANSLATIONS: Record<LanguageCode, Record<string, string>> = {
     randomQuizSub: 'अपनी चयनित कक्षा के लिए एक त्वरित पाठ्यक्रम क्विज़ शुरू करें।',
     langModalTitle: 'क्विज़ मोड और भाषा चुनें',
     langModalSubtitle:
-      'क्विज़ शुरू करने से पहले अपना पसंदीदा मोड और भाषा चुनें। "क्विज़ शुरू करें" पर क्लिक करने पर ही प्रश्न और टाइमर शुरू होंगे।',
+      'क्विज़ शुरू करने से पहले चरण-दर-चरण अपना पसंदीदा मोड और भाषा चुनें।',
+    stepBadge1Of2: 'चरण 1 / 2 · क्विज़ मोड',
+    stepBadge2Of2: 'चरण 2 / 2 · क्विज़ भाषा',
+    step1Title: 'चरण 1: क्विज़ मोड चुनें',
+    step1Subtitle:
+      'अभ्यास मोड, समयबद्ध मोड, परीक्षा मोड या चैलेंज मोड चुनें और "जारी रखें (Continue)" पर क्लिक करें।',
+    step2Title: 'चरण 2: क्विज़ भाषा चुनें',
+    step2Subtitle:
+      'इस क्विज़ के लिए अपनी पसंदीदा भाषा चुनें और प्रश्न बनाने के लिए "क्विज़ शुरू करें" पर क्लिक करें।',
+    stepContinueBtn: 'जारी रखें (Continue)',
+    stepBackBtn: 'वापस जाएँ (Back)',
     langModalExplicitNote:
       'एक बार क्विज़ शुरू होने के बाद मोड नहीं बदला जा सकता; आप अगले क्विज़ के लिए फिर से चुन सकते हैं।',
     langCardEnDesc: 'Complete quiz, options, hints & explanations in English',

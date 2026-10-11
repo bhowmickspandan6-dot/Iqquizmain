@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useMemo } from 'react';
+import React, { useState, useEffect, useMemo, useRef } from 'react';
 import { AnimatePresence, MotionConfig, motion } from 'motion/react';
 import {
   LayoutDashboard,
@@ -219,6 +219,7 @@ export default function App() {
   const [pendingLaunch, setPendingLaunch] = useState<PendingLaunchInternal | null>(null);
   const [generatingQuiz, setGeneratingQuiz] = useState(false);
   const [quizGenError, setQuizGenError] = useState<string | null>(null);
+  const quizGenInFlightRef = useRef(false);
   const [settingsSavedBanner, setSettingsSavedBanner] = useState(false);
 
   const effectiveUserId = currentUser?.uid || clientUid;
@@ -703,6 +704,7 @@ export default function App() {
       noteMcqs?: StudyNoteAnalysis['mcqs'];
     }
   ) => {
+    if (generatingQuiz || quizGenInFlightRef.current) return;
     setQuizGenError(null);
     const resolvedCount = (overrideConfig?.questionCount ?? questionCount) as QuizQuestionCount;
     const resolvedMode = normalizeQuizMode(overrideConfig?.mode ?? quizMode);
@@ -749,13 +751,14 @@ export default function App() {
     );
   };
 
-  // Execute Quiz Generation ONLY after the student explicitly selects a Quiz Mode + Language & clicks Start Quiz in the modal
+  // Execute Quiz Generation ONLY after the student explicitly selects a Quiz Mode (Step 1) + Language (Step 2) & clicks Start Quiz (Step 3)
   // CRITICAL: Do not generate questions or start the timer until the user clicks "Start Quiz"!
   const handleConfirmLanguageAndGenerate = async (
     confirmedQuizLanguage: LanguageCode,
     confirmedQuizMode: SelectableQuizMode
   ) => {
-    if (!pendingLaunch) return;
+    if (!pendingLaunch || generatingQuiz || quizGenInFlightRef.current) return;
+    quizGenInFlightRef.current = true;
 
     const normalizedMode = normalizeQuizMode(confirmedQuizMode);
     const resolvedDuration: QuizDuration =
@@ -880,6 +883,7 @@ export default function App() {
       // Keep pendingLaunch open so student can retry without losing class, subject, mode, or language selection
       setQuizGenError(err?.message || t(interfaceLanguage, 'genErrorTitle'));
     } finally {
+      quizGenInFlightRef.current = false;
       setGeneratingQuiz(false);
     }
   };
