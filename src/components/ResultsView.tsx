@@ -11,7 +11,7 @@ import {
   Award,
   BookOpen,
 } from 'lucide-react';
-import { LanguageCode, QuizAttemptState } from '../types';
+import { LanguageCode, QuizAttemptState, normalizeQuizMode } from '../types';
 import { t, LANGUAGE_LABELS } from '../i18n/translations';
 import { getSubjectDefinition } from '../data/curriculum';
 
@@ -50,6 +50,7 @@ export const ResultsView: React.FC<ResultsViewProps> = ({
   };
 
   const subjectDef = getSubjectDefinition(attempt.config.subject);
+  const normalizedMode = normalizeQuizMode(attempt.config.mode);
 
   const formatDuration = (secs: number) => {
     const m = Math.floor(secs / 60);
@@ -98,9 +99,13 @@ export const ResultsView: React.FC<ResultsViewProps> = ({
                 {LANGUAGE_LABELS[attempt.config.quizLanguage]}
               </span>
               <span aria-hidden="true">·</span>
-              <span>
-                {attempt.config.mode === 'test'
-                  ? t(interfaceLanguage, 'modeTest')
+              <span className="font-semibold text-indigo-700">
+                {normalizedMode === 'exam'
+                  ? t(interfaceLanguage, 'modeExam')
+                  : normalizedMode === 'challenge'
+                  ? t(interfaceLanguage, 'modeChallenge')
+                  : normalizedMode === 'timed'
+                  ? t(interfaceLanguage, 'modeTimed')
                   : t(interfaceLanguage, 'modePractice')}
               </span>
             </div>

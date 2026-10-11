@@ -796,6 +796,16 @@ interface ServerLockedAnswer {
   isCorrect: boolean;
 }
 
+type ServerQuizMode = 'practice' | 'timed' | 'exam' | 'challenge' | 'test';
+
+function normalizeServerQuizMode(mode?: string): 'practice' | 'timed' | 'exam' | 'challenge' {
+  if (mode === 'practice') return 'practice';
+  if (mode === 'timed') return 'timed';
+  if (mode === 'challenge') return 'challenge';
+  if (mode === 'exam' || mode === 'test') return 'exam';
+  return 'timed';
+}
+
 interface ServerQuizAttempt {
   attemptId: string;
   parentAttemptId?: string;
@@ -809,7 +819,7 @@ interface ServerQuizAttempt {
     questionCount: number;
     questionType: string;
     durationMinutes: number;
-    mode: 'practice' | 'test';
+    mode: ServerQuizMode;
   };
   questions: ServerQuestion[];
   lockedAnswers: Record<string, ServerLockedAnswer>;
@@ -945,11 +955,12 @@ function resolveServerAttempt(
 
 function sanitizeAttemptForClient(attempt: ServerQuizAttempt) {
   const isCompleted = attempt.status === 'completed';
-  const isPractice = attempt.config.mode === 'practice';
+  const normalizedMode = normalizeServerQuizMode(attempt.config.mode);
+  const hidesAnswersUntilCompleted = normalizedMode === 'exam';
 
   const clientQuestions = attempt.questions.map((q) => {
     const isQuestionLocked = Boolean(attempt.lockedAnswers[q.id]);
-    const revealAnswer = isCompleted || (isPractice && isQuestionLocked);
+    const revealAnswer = isCompleted || (!hidesAnswersUntilCompleted && isQuestionLocked);
 
     return {
       id: q.id,
@@ -977,7 +988,7 @@ function sanitizeAttemptForClient(attempt: ServerQuizAttempt) {
   const clientLockedAnswers: Record<string, any> = {};
   for (const [qId, lock] of Object.entries(attempt.lockedAnswers)) {
     const q = attempt.questions.find((item) => item.id === qId);
-    const revealAnswer = isCompleted || isPractice;
+    const revealAnswer = isCompleted || !hidesAnswersUntilCompleted;
     clientLockedAnswers[qId] = {
       questionId: lock.questionId,
       selectedIndex: lock.selectedIndex,
@@ -1258,8 +1269,8 @@ async function generateFreshVerifiedQuizQuestions(params: {
     // Request a small buffer (+2) so if 1-2 items are similar to history, we still complete in Pass 1
     const batchRequestCount =
       pass === 1
-        ? Math.min(remainingNeeded + 2, 32)
-        : Math.min(remainingNeeded + 3, 15);
+        ? Math.min(remainingNeeded + 2, 54)
+        : Math.min(remainingNeeded + 3, 20);
 
     // Build token-optimized exclusion context from history + current accepted + rejected
     const recentConceptKeys = Array.from(
@@ -1317,10 +1328,11 @@ ${
 }\n`
         : '';
 
-    // Split large question requests into parallel sub-batches (max 7 per call) so generation completes in ~3s without timing out
+    // Split large question requests into parallel sub-batches so generation completes quickly without timing out
+    const chunkLimit = questionCount >= 30 ? 10 : MAX_QUESTIONS_PER_CHUNK;
     const chunkDescriptors: { count: number; slots: string[]; chunkIndex: number }[] = [];
-    for (let offset = 0, cIdx = 0; offset < batchRequestCount; offset += MAX_QUESTIONS_PER_CHUNK, cIdx++) {
-      const sliceSlots = slotAssignments.slice(offset, offset + MAX_QUESTIONS_PER_CHUNK);
+    for (let offset = 0, cIdx = 0; offset < batchRequestCount; offset += chunkLimit, cIdx++) {
+      const sliceSlots = slotAssignments.slice(offset, offset + chunkLimit);
       chunkDescriptors.push({
         count: sliceSlots.length,
         slots: sliceSlots,
@@ -1581,7 +1593,7 @@ export default async function handler(req: any, res: any) {
         return;
       }
 
-      const validCount = [5, 10, 15, 20, 30].includes(Number(questionCount))
+      const validCount = [5, 10, 15, 20, 30, 50].includes(Number(questionCount))
         ? Number(questionCount)
         : 5;
       const validClass = [5, 6, 7, 8, 9, 10].includes(Number(classLevel))
@@ -1647,6 +1659,10 @@ export default async function handler(req: any, res: any) {
       const relevantHistory = Array.from(mergedHistoryMap.values());
 
       try {
+        const normalizedMode = normalizeServerQuizMode(mode);
+        const resolvedDifficulty =
+          normalizedMode === 'challenge' ? 'hard' : String(difficulty || 'mixed');
+
         const { questions, modelUsed, rejectedDuplicatesCount } =
           await generateFreshVerifiedQuizQuestions({
             ai,
@@ -1654,7 +1670,7 @@ export default async function handler(req: any, res: any) {
             subject: String(subject),
             quizLanguage: validQuizLang,
             topic: String(topic),
-            difficulty: String(difficulty),
+            difficulty: resolvedDifficulty,
             questionCount: validCount,
             questionType: String(questionType),
             existingHistory: relevantHistory,
@@ -1672,6 +1688,12 @@ export default async function handler(req: any, res: any) {
         // Persist newly generated questions into server history for this user
         recordQuestionsInServerHistory(cleanUserId, questions);
 
+        const timerMap: Record<number, number> = { 5: 3, 10: 7, 15: 10, 20: 15, 30: 25, 50: 45 };
+        const resolvedDuration =
+          normalizedMode === 'practice'
+            ? 0
+            : timerMap[questions.length] ?? timerMap[validCount] ?? (Number(durationMinutes) || 3);
+
         const attemptId = `att_${Date.now()}_${crypto.randomBytes(4).toString('hex')}`;
         const attempt: ServerQuizAttempt = {
           attemptId,
@@ -1681,11 +1703,11 @@ export default async function handler(req: any, res: any) {
             subject: String(subject),
             quizLanguage: validQuizLang,
             topic: String(topic),
-            difficulty: String(difficulty),
+            difficulty: resolvedDifficulty,
             questionCount: questions.length,
             questionType: String(questionType),
-            durationMinutes: Number(durationMinutes) || 0,
-            mode: mode === 'test' ? 'test' : 'practice',
+            durationMinutes: resolvedDuration,
+            mode: normalizedMode,
           },
           questions,
           lockedAnswers: {},
@@ -1945,7 +1967,7 @@ export default async function handler(req: any, res: any) {
       const validClass = [5, 6, 7, 8, 9, 10].includes(Number(baseConfig.classLevel))
         ? Number(baseConfig.classLevel)
         : 8;
-      const validCount = [5, 10, 15, 20, 30].includes(Number(baseConfig.questionCount))
+      const validCount = [5, 10, 15, 20, 30, 50].includes(Number(baseConfig.questionCount))
         ? Number(baseConfig.questionCount)
         : Math.max(5, baseQuestions.length || 5);
       const cleanUserId = String(userId || 'local_student');
@@ -2015,6 +2037,12 @@ export default async function handler(req: any, res: any) {
       }
 
       try {
+        const requestedMode = normalizeServerQuizMode(body?.mode || baseConfig.mode);
+        const resolvedDifficulty =
+          requestedMode === 'challenge'
+            ? 'hard'
+            : String(baseConfig.difficulty || 'mixed');
+
         const { questions: retakeQuestions, modelUsed } =
           await generateFreshVerifiedQuizQuestions({
             ai,
@@ -2022,7 +2050,7 @@ export default async function handler(req: any, res: any) {
             subject: String(baseConfig.subject),
             quizLanguage: targetLang,
             topic: String(baseConfig.topic || 'All Verified Chapters'),
-            difficulty: String(baseConfig.difficulty || 'mixed'),
+            difficulty: resolvedDifficulty,
             questionCount: validCount,
             questionType: String(baseConfig.questionType || 'mcq'),
             existingHistory: Array.from(mergedHistoryMap.values()),
@@ -2038,6 +2066,12 @@ export default async function handler(req: any, res: any) {
 
         recordQuestionsInServerHistory(cleanUserId, retakeQuestions);
 
+        const timerMap: Record<number, number> = { 5: 3, 10: 7, 15: 10, 20: 15, 30: 25, 50: 45 };
+        const resolvedDuration =
+          requestedMode === 'practice'
+            ? 0
+            : timerMap[retakeQuestions.length] ?? timerMap[validCount] ?? 3;
+
         const newAttemptId = `att_${Date.now()}_${crypto.randomBytes(4).toString('hex')}`;
         const newAttempt: ServerQuizAttempt = {
           attemptId: newAttemptId,
@@ -2047,7 +2081,10 @@ export default async function handler(req: any, res: any) {
             ...baseConfig,
             classLevel: validClass,
             quizLanguage: targetLang,
+            difficulty: resolvedDifficulty,
             questionCount: retakeQuestions.length,
+            durationMinutes: resolvedDuration,
+            mode: requestedMode,
           },
           questions: retakeQuestions,
           lockedAnswers: {},
@@ -2128,6 +2165,13 @@ export default async function handler(req: any, res: any) {
 
       recordQuestionsInServerHistory(String(userId), validated);
 
+      const requestedNotesMode = normalizeServerQuizMode(body?.mode || 'practice');
+      const timerMap: Record<number, number> = { 5: 3, 10: 7, 15: 10, 20: 15, 30: 25, 50: 45 };
+      const notesDuration =
+        requestedNotesMode === 'practice'
+          ? 0
+          : timerMap[validated.length] ?? 7;
+
       const attemptId = `att_notes_${Date.now()}_${crypto.randomBytes(3).toString('hex')}`;
       const attempt: ServerQuizAttempt = {
         attemptId,
@@ -2137,11 +2181,11 @@ export default async function handler(req: any, res: any) {
           subject: String(subject),
           quizLanguage: validQuizLang,
           topic: String(topic),
-          difficulty: 'mixed',
+          difficulty: requestedNotesMode === 'challenge' ? 'hard' : 'mixed',
           questionCount: validated.length,
           questionType: 'mcq',
-          durationMinutes: 10,
-          mode: 'practice',
+          durationMinutes: notesDuration,
+          mode: requestedNotesMode,
         },
         questions: validated,
         lockedAnswers: {},

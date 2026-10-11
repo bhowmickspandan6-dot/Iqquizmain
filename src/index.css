@@ -81,6 +81,21 @@
     touch-action: manipulation;
   }
 
+  /* Strict full-page scroll and touch-gesture lock while quiz generation is in progress */
+  html[data-quiz-generating="true"],
+  html[data-quiz-generating="true"] body,
+  html[data-quiz-generating="true"] #root {
+    overflow: hidden !important;
+    overscroll-behavior: none !important;
+    touch-action: none !important;
+  }
+
+  html[data-quiz-generating="true"] *,
+  html[data-quiz-generating="true"] *::before,
+  html[data-quiz-generating="true"] *::after {
+    touch-action: none !important;
+  }
+
   button,
   select,
   input,

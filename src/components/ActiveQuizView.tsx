@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef, useMemo } from 'react';
 import { AnimatePresence, motion } from 'motion/react';
 import {
   Lock,
@@ -13,9 +13,18 @@ import {
   Send,
   ShieldAlert,
 } from 'lucide-react';
-import { LanguageCode, QuizAttemptState } from '../types';
+import {
+  LanguageCode,
+  QuizAttemptState,
+  doesModeHideAnswersUntilCompleted,
+  normalizeQuizMode,
+} from '../types';
 import { t, LANGUAGE_LABELS } from '../i18n/translations';
 import { getSubjectDefinition } from '../data/curriculum';
+import {
+  getOrInitAttemptTimer,
+  computeTimerSnapshot,
+} from '../utils/quizTimer';
 
 interface ActiveQuizViewProps {
   attempt: QuizAttemptState;
@@ -45,32 +54,100 @@ export const ActiveQuizView: React.FC<ActiveQuizViewProps> = ({
   const [showHint, setShowHint] = useState<Record<string, boolean>>({});
   const [lockError, setLockError] = useState<string | null>(null);
 
-  // Elapsed timer tracking (persisted across refreshes via attempt.startedAt)
-  const [elapsedSeconds, setElapsedSeconds] = useState<number>(() => {
-    const startMs = new Date(attempt.startedAt).getTime();
-    const diff = Math.max(0, Math.floor((Date.now() - startMs) / 1000));
-    return Math.max(attempt.timeTakenSeconds || 0, diff);
-  });
+  // Keep a live ref to onSubmitQuiz so auto-submission on timer expiry ALWAYS uses the latest attempt state
+  const onSubmitQuizRef = useRef(onSubmitQuiz);
+  useEffect(() => {
+    onSubmitQuizRef.current = onSubmitQuiz;
+  }, [onSubmitQuiz]);
 
-  const totalAllowedSeconds =
-    attempt.config.durationMinutes > 0 ? attempt.config.durationMinutes * 60 : 0;
-  const remainingSeconds =
-    totalAllowedSeconds > 0 ? Math.max(0, totalAllowedSeconds - elapsedSeconds) : 0;
+  const hasAutoSubmittedRef = useRef<string | null>(null);
 
+  // Initialize or restore persistent start/end timestamps for this attempt
+  const timerRecord = useMemo(
+    () => getOrInitAttemptTimer(attempt),
+    [attempt.attemptId, attempt.config.durationMinutes, attempt.config.mode]
+  );
+
+  const normalizedMode = normalizeQuizMode(attempt.config.mode);
+  const totalAllowedSeconds = timerRecord.totalAllowedSeconds;
+  const isTimedQuiz = normalizedMode !== 'practice' && totalAllowedSeconds > 0;
+  const hideAnswersUntilComplete = doesModeHideAnswersUntilCompleted(attempt.config.mode);
+  const allowStudyHints = normalizedMode === 'practice' || normalizedMode === 'timed';
+
+  const [timerState, setTimerState] = useState(() =>
+    computeTimerSnapshot(timerRecord, Date.now())
+  );
+
+  const elapsedSeconds = timerState.elapsedSeconds;
+  const remainingSeconds = timerState.remainingSeconds;
+
+  // Warning states:
+  // - Yellow warning when 1 minute (60s) or less remains (> 10s)
+  // - Red warning when 10 seconds or less remain
+  const isRedWarning = isTimedQuiz && remainingSeconds <= 10;
+  const isYellowWarning = isTimedQuiz && remainingSeconds <= 60 && remainingSeconds > 10;
+
+  // Timestamp-driven countdown loop (immune to tab throttling, refresh, or accidental navigation)
   useEffect(() => {
     if (attempt.status === 'completed') return;
-    const interval = setInterval(() => {
-      setElapsedSeconds((prev) => {
-        const next = prev + 1;
-        if (totalAllowedSeconds > 0 && next >= totalAllowedSeconds) {
-          clearInterval(interval);
-          onSubmitQuiz(totalAllowedSeconds);
+
+    const syncFromTimestamp = () => {
+      const snap = computeTimerSnapshot(timerRecord, Date.now());
+      setTimerState((prev) => {
+        if (
+          prev.remainingSeconds === snap.remainingSeconds &&
+          prev.elapsedSeconds === snap.elapsedSeconds &&
+          prev.isExpired === snap.isExpired
+        ) {
+          return prev;
         }
-        return next;
+        return snap;
       });
-    }, 1000);
-    return () => clearInterval(interval);
-  }, [attempt.status, totalAllowedSeconds]);
+
+      if (
+        isTimedQuiz &&
+        snap.isExpired &&
+        hasAutoSubmittedRef.current !== attempt.attemptId
+      ) {
+        hasAutoSubmittedRef.current = attempt.attemptId;
+        setShowSubmitModal(false);
+        setSubmittingQuiz(true);
+        Promise.resolve(onSubmitQuizRef.current(totalAllowedSeconds)).finally(() => {
+          setSubmittingQuiz(false);
+        });
+      }
+    };
+
+    // Run immediately so an already-expired attempt on refresh submits right away
+    syncFromTimestamp();
+
+    const intervalId = window.setInterval(syncFromTimestamp, 250);
+    const handleVisibilityOrFocus = () => {
+      syncFromTimestamp();
+    };
+
+    document.addEventListener('visibilitychange', handleVisibilityOrFocus);
+    window.addEventListener('focus', handleVisibilityOrFocus);
+    window.addEventListener('pageshow', handleVisibilityOrFocus);
+
+    return () => {
+      window.clearInterval(intervalId);
+      document.removeEventListener('visibilitychange', handleVisibilityOrFocus);
+      window.removeEventListener('focus', handleVisibilityOrFocus);
+      window.removeEventListener('pageshow', handleVisibilityOrFocus);
+    };
+  }, [attempt.attemptId, attempt.status, isTimedQuiz, timerRecord, totalAllowedSeconds]);
+
+  // Warn against accidental browser tab closure during an active timed quiz
+  useEffect(() => {
+    if (attempt.status === 'completed' || !isTimedQuiz) return;
+    const handleBeforeUnload = (e: BeforeUnloadEvent) => {
+      e.preventDefault();
+      e.returnValue = '';
+    };
+    window.addEventListener('beforeunload', handleBeforeUnload);
+    return () => window.removeEventListener('beforeunload', handleBeforeUnload);
+  }, [attempt.status, isTimedQuiz]);
 
   const questions = attempt.questions;
   const currentQuestion = questions[currentIndex] || questions[0];
@@ -88,15 +165,20 @@ export const ActiveQuizView: React.FC<ActiveQuizViewProps> = ({
   const unansweredCount = questions.length - lockedCount;
 
   const formatTime = (secs: number) => {
-    const mins = Math.floor(secs / 60);
-    const rem = secs % 60;
+    const safeSecs = Math.max(0, Math.floor(secs));
+    const mins = Math.floor(safeSecs / 60);
+    const rem = safeSecs % 60;
     return `${String(mins).padStart(2, '0')}:${String(rem).padStart(2, '0')}`;
   };
 
+  const progressPct = isTimedQuiz
+    ? Math.max(0, Math.min(100, (remainingSeconds / totalAllowedSeconds) * 100))
+    : 100;
+
   const handleSelectOption = (optionIdx: number) => {
     setLockError(null);
-    // CRITICAL: If this question is already locked, forbid any interaction!
-    if (isLocked || lockingQuestionId === currentQuestion.id) {
+    // CRITICAL: If this question is already locked or quiz is auto-submitting, forbid any interaction!
+    if (isLocked || lockingQuestionId === currentQuestion.id || submittingQuiz) {
       setLockError(t(quizLang, 'answerLockedBadge'));
       return;
     }
@@ -107,7 +189,7 @@ export const ActiveQuizView: React.FC<ActiveQuizViewProps> = ({
   };
 
   const handleConfirmLock = async () => {
-    if (isLocked) return;
+    if (isLocked || submittingQuiz) return;
     const chosen = draftSelections[currentQuestion.id];
     if (typeof chosen !== 'number') return;
 
@@ -123,6 +205,8 @@ export const ActiveQuizView: React.FC<ActiveQuizViewProps> = ({
   };
 
   const handleFinalSubmit = async () => {
+    if (submittingQuiz) return;
+    hasAutoSubmittedRef.current = attempt.attemptId;
     setSubmittingQuiz(true);
     try {
       await onSubmitQuiz(elapsedSeconds);
@@ -137,68 +221,158 @@ export const ActiveQuizView: React.FC<ActiveQuizViewProps> = ({
       initial={{ opacity: 0, y: 10 }}
       animate={{ opacity: 1, y: 0 }}
       transition={{ duration: 0.22, ease: [0.22, 1, 0.36, 1] }}
-      className="max-w-6xl mx-auto space-y-6"
+      className="max-w-6xl mx-auto space-y-5"
     >
-      {/* Top Assessment Header Bar */}
-      <div className="bg-white border border-slate-200 rounded-xl p-4 sm:p-5 flex flex-wrap items-center justify-between gap-4">
-        <div>
-          <div className="flex items-center gap-2 text-xs text-slate-500">
-            <span>
-              {t(quizLang, 'classLabel')} {attempt.config.classLevel}
-            </span>
-            <span aria-hidden="true">·</span>
-            <span className="font-semibold text-slate-800">
-              {subjectDef.name[quizLang]}
-            </span>
-            <span aria-hidden="true">·</span>
-            <span>
-              {t(quizLang, 'quizLangLabel')}:{' '}
-              <strong className="text-indigo-700">
-                {LANGUAGE_LABELS[quizLang]}
-              </strong>
-            </span>
-            <span aria-hidden="true">·</span>
-            <span>
-              {attempt.config.mode === 'test'
-                ? t(quizLang, 'modeTest')
-                : t(quizLang, 'modePractice')}
-            </span>
-          </div>
-          <h2 className="text-lg font-bold text-slate-900 mt-1">
-            {attempt.config.topic}
-          </h2>
-        </div>
-
-        <div className="flex items-center gap-4">
-          {/* Timer Display */}
-          <div
-            className={`flex items-center gap-2 px-3.5 py-2 rounded-lg border font-mono text-sm font-semibold tabular-nums ${
-              totalAllowedSeconds > 0 && remainingSeconds <= 60
-                ? 'bg-red-50 border-red-200 text-red-700'
-                : 'bg-slate-50 border-slate-200 text-slate-900'
-            }`}
-          >
-            <Clock className="w-4 h-4 text-slate-600 shrink-0" />
-            {totalAllowedSeconds > 0 ? (
+      {/* Top Assessment & Sticky Countdown Timer Bar (Responsive on Mobile & Desktop) */}
+      <div className="sticky top-2 z-20 bg-white/95 backdrop-blur-xs border border-slate-200 rounded-xl shadow-xs overflow-hidden">
+        <div className="p-3.5 sm:p-5 flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3.5">
+          <div className="min-w-0">
+            <div className="flex flex-wrap items-center gap-1.5 sm:gap-2 text-xs text-slate-500">
               <span>
-                {t(quizLang, 'timeRemaining')}: {formatTime(remainingSeconds)}
+                {t(quizLang, 'classLabel')} {attempt.config.classLevel}
               </span>
-            ) : (
+              <span aria-hidden="true">·</span>
+              <span className="font-semibold text-slate-800">
+                {subjectDef.name[quizLang]}
+              </span>
+              <span aria-hidden="true">·</span>
               <span>
-                {t(quizLang, 'untimedLabel')} · {formatTime(elapsedSeconds)}
+                {t(quizLang, 'quizLangLabel')}:{' '}
+                <strong className="text-indigo-700">
+                  {LANGUAGE_LABELS[quizLang]}
+                </strong>
               </span>
-            )}
+              <span aria-hidden="true">·</span>
+              <span
+                className={`inline-flex items-center gap-1 font-semibold px-2 py-0.5 rounded-md text-[11px] ${
+                  normalizedMode === 'exam'
+                    ? 'bg-slate-900 text-white'
+                    : normalizedMode === 'challenge'
+                    ? 'bg-amber-100 text-amber-950 border border-amber-300'
+                    : normalizedMode === 'timed'
+                    ? 'bg-indigo-50 text-indigo-800 border border-indigo-200'
+                    : 'bg-emerald-50 text-emerald-800 border border-emerald-200'
+                }`}
+              >
+                {normalizedMode === 'exam'
+                  ? t(quizLang, 'examNoPauseBadge')
+                  : normalizedMode === 'challenge'
+                  ? t(quizLang, 'challengeModeBadge')
+                  : normalizedMode === 'timed'
+                  ? t(quizLang, 'timedModeBadge')
+                  : t(quizLang, 'untimedLabel')}
+              </span>
+            </div>
+            <h2 className="text-base sm:text-lg font-bold text-slate-900 mt-1 truncate">
+              {attempt.config.topic}
+            </h2>
           </div>
 
-          <button
-            type="button"
-            onClick={() => setShowSubmitModal(true)}
-            className="px-4 py-2 bg-slate-900 hover:bg-slate-800 text-white text-sm font-semibold rounded-lg transition-colors flex items-center gap-2 whitespace-nowrap shrink-0 cursor-pointer"
-          >
-            <Send className="w-4 h-4" />
-            {t(quizLang, 'finishAndSubmitTestBtn')}
-          </button>
+          <div className="flex items-center justify-between sm:justify-end gap-2.5 sm:gap-3 shrink-0">
+            {/* Countdown / Untimed Display */}
+            <div
+              role="timer"
+              aria-live={isRedWarning ? 'assertive' : 'off'}
+              aria-atomic="true"
+              className={`flex items-center gap-2 px-3.5 py-2 rounded-lg border font-mono text-sm sm:text-base font-bold tabular-nums transition-colors ${
+                isRedWarning
+                  ? 'bg-red-100 border-red-500 text-red-800 ring-2 ring-red-500/30 animate-pulse'
+                  : isYellowWarning
+                  ? 'bg-amber-100 border-amber-400 text-amber-900 ring-2 ring-amber-400/30'
+                  : isTimedQuiz
+                  ? 'bg-slate-50 border-slate-200 text-slate-900'
+                  : 'bg-emerald-50/70 border-emerald-200 text-emerald-900'
+              }`}
+            >
+              <Clock
+                className={`w-4 h-4 shrink-0 ${
+                  isRedWarning
+                    ? 'text-red-700'
+                    : isYellowWarning
+                    ? 'text-amber-700'
+                    : isTimedQuiz
+                    ? 'text-slate-600'
+                    : 'text-emerald-700'
+                }`}
+              />
+              {isTimedQuiz ? (
+                <span>
+                  {t(quizLang, 'timeRemaining')}: {formatTime(remainingSeconds)}
+                </span>
+              ) : (
+                <span>
+                  {t(quizLang, 'untimedLabel')} · {formatTime(elapsedSeconds)}
+                </span>
+              )}
+            </div>
+
+            <button
+              type="button"
+              disabled={submittingQuiz}
+              onClick={() => setShowSubmitModal(true)}
+              className="px-3.5 sm:px-4 py-2 bg-slate-900 hover:bg-slate-800 disabled:opacity-50 text-white text-xs sm:text-sm font-semibold rounded-lg transition-colors flex items-center gap-1.5 whitespace-nowrap shrink-0 cursor-pointer"
+            >
+              <Send className="w-3.5 h-3.5 sm:w-4 sm:h-4" />
+              <span>{t(quizLang, 'finishAndSubmitTestBtn')}</span>
+            </button>
+          </div>
         </div>
+
+        {/* Visual Countdown Progress Strip */}
+        {isTimedQuiz && (
+          <div className="w-full h-1.5 bg-slate-100 overflow-hidden">
+            <div
+              className={`h-full transition-all duration-300 ${
+                isRedWarning
+                  ? 'bg-red-600'
+                  : isYellowWarning
+                  ? 'bg-amber-500'
+                  : 'bg-indigo-600'
+              }`}
+              style={{ width: `${progressPct}%` }}
+            />
+          </div>
+        )}
+
+        {/* Yellow (<= 1 min) & Red (<= 10 sec) Warning Banner */}
+        <AnimatePresence>
+          {(isYellowWarning || isRedWarning || submittingQuiz) && (
+            <motion.div
+              key={
+                submittingQuiz
+                  ? 'auto-submitting'
+                  : isRedWarning
+                  ? 'red-warning'
+                  : 'yellow-warning'
+              }
+              initial={{ opacity: 0, height: 0 }}
+              animate={{ opacity: 1, height: 'auto' }}
+              exit={{ opacity: 0, height: 0 }}
+              transition={{ duration: 0.18 }}
+              className={`px-4 py-2 text-xs font-semibold flex items-center justify-between gap-2 border-t ${
+                isRedWarning || submittingQuiz
+                  ? 'bg-red-600 text-white border-red-700'
+                  : 'bg-amber-100 text-amber-950 border-amber-300'
+              }`}
+            >
+              <div className="flex items-center gap-2">
+                <AlertTriangle className="w-4 h-4 shrink-0" />
+                <span>
+                  {submittingQuiz && remainingSeconds <= 0
+                    ? t(quizLang, 'autoSubmittingMsg')
+                    : isRedWarning
+                    ? t(quizLang, 'timerWarningRed')
+                    : t(quizLang, 'timerWarningYellow')}
+                </span>
+              </div>
+              {isTimedQuiz && (
+                <span className="font-mono font-bold tabular-nums shrink-0">
+                  {formatTime(remainingSeconds)}
+                </span>
+              )}
+            </motion.div>
+          )}
+        </AnimatePresence>
       </div>
 
       {/* Main Two-Column Quiz Workspace */}
@@ -259,7 +433,7 @@ export const ActiveQuizView: React.FC<ActiveQuizViewProps> = ({
                 <p className="text-base sm:text-lg font-semibold text-slate-900 leading-relaxed">
                   {currentQuestion.questionText}
                 </p>
-                {currentQuestion.hint && !isLocked && (
+                {currentQuestion.hint && !isLocked && allowStudyHints && (
                   <div>
                     <button
                       type="button"
@@ -299,10 +473,12 @@ export const ActiveQuizView: React.FC<ActiveQuizViewProps> = ({
                   const optionLetter = String.fromCharCode(65 + idx);
                   const isSelected = selectedOptionIndex === idx;
 
-                  // Determine visual state when locked in Practice Mode
+                  // Determine visual state when locked:
+                  // In Practice, Timed, and Challenge modes, show immediate answer feedback if available.
+                  // In Exam Mode, hide correct answers until the quiz is completed.
                   const showPracticeFeedback =
                     isLocked &&
-                    attempt.config.mode === 'practice' &&
+                    !hideAnswersUntilComplete &&
                     typeof lockedRecord?.correctIndex === 'number';
                   const isCorrectOption =
                     showPracticeFeedback && lockedRecord.correctIndex === idx;
@@ -321,7 +497,7 @@ export const ActiveQuizView: React.FC<ActiveQuizViewProps> = ({
                         borderAndBg = 'border-slate-200 bg-slate-50 text-slate-400 opacity-75';
                       }
                     } else {
-                      // Test Mode locked state (correct answer remains hidden on server!)
+                      // Exam Mode locked state (correct answer remains hidden until quiz completion!)
                       if (isSelected) {
                         borderAndBg = 'border-slate-900 bg-slate-100 text-slate-900';
                       } else {
@@ -337,7 +513,7 @@ export const ActiveQuizView: React.FC<ActiveQuizViewProps> = ({
                     <button
                       key={idx}
                       type="button"
-                      disabled={isLocked || lockingQuestionId === currentQuestion.id}
+                      disabled={isLocked || lockingQuestionId === currentQuestion.id || submittingQuiz}
                       onClick={() => handleSelectOption(idx)}
                       className={`w-full text-left p-4 rounded-xl border transition-all flex items-start justify-between gap-4 ${borderAndBg} ${
                         isLocked ? 'cursor-not-allowed' : 'cursor-pointer'
@@ -403,7 +579,8 @@ export const ActiveQuizView: React.FC<ActiveQuizViewProps> = ({
                     type="button"
                     disabled={
                       typeof selectedOptionIndex !== 'number' ||
-                      lockingQuestionId === currentQuestion.id
+                      lockingQuestionId === currentQuestion.id ||
+                      submittingQuiz
                     }
                     onClick={handleConfirmLock}
                     className="w-full py-3 px-5 rounded-xl bg-slate-900 hover:bg-slate-800 disabled:bg-slate-200 disabled:text-slate-400 text-white font-semibold text-sm transition-colors flex items-center justify-center gap-2 cursor-pointer disabled:cursor-not-allowed"
@@ -422,7 +599,7 @@ export const ActiveQuizView: React.FC<ActiveQuizViewProps> = ({
                   className="pt-2 space-y-4"
                 >
                   {/* Locked Status Banner */}
-                  {attempt.config.mode === 'practice' ? (
+                  {!hideAnswersUntilComplete && typeof lockedRecord.correctIndex === 'number' ? (
                     <div
                       className={`p-4 rounded-xl border ${
                         lockedRecord.isCorrect
@@ -550,7 +727,7 @@ export const ActiveQuizView: React.FC<ActiveQuizViewProps> = ({
 
                 let btnClass = 'bg-slate-50 border-slate-200 text-slate-700 hover:bg-slate-100';
                 if (qLocked) {
-                  if (attempt.config.mode === 'practice') {
+                  if (!hideAnswersUntilComplete && typeof qLocked.isCorrect === 'boolean') {
                     btnClass = qLocked.isCorrect
                       ? 'bg-emerald-600 border-emerald-600 text-white'
                       : 'bg-red-600 border-red-600 text-white';

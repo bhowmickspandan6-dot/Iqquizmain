@@ -15,9 +15,59 @@ export type DifficultyLevel = 'easy' | 'medium' | 'hard' | 'mixed';
 
 export type QuestionTypeFilter = 'mcq' | 'tf' | 'mixed';
 
-export type QuizDuration = 0 | 10 | 20 | 30;
+export type QuizQuestionCount = 5 | 10 | 15 | 20 | 30 | 50;
 
-export type QuizMode = 'practice' | 'test';
+export type QuizDuration = 0 | 3 | 7 | 10 | 15 | 20 | 25 | 30 | 45;
+
+export type QuizMode = 'practice' | 'timed' | 'exam' | 'challenge' | 'test';
+
+export type SelectableQuizMode = 'practice' | 'timed' | 'exam' | 'challenge';
+
+export function normalizeQuizMode(mode?: string): SelectableQuizMode {
+  if (mode === 'practice') return 'practice';
+  if (mode === 'timed') return 'timed';
+  if (mode === 'challenge') return 'challenge';
+  if (mode === 'exam' || mode === 'test') return 'exam';
+  return 'timed';
+}
+
+export function isTimedQuizMode(mode?: string): boolean {
+  return normalizeQuizMode(mode) !== 'practice';
+}
+
+export function doesModeHideAnswersUntilCompleted(mode?: string): boolean {
+  return normalizeQuizMode(mode) === 'exam';
+}
+
+export const QUIZ_QUESTION_COUNTS = [5, 10, 20, 30, 50] as const;
+
+export const QUIZ_TIMER_MINUTES_BY_COUNT: Record<number, QuizDuration> = {
+  5: 3,
+  10: 7,
+  15: 10,
+  20: 15,
+  30: 25,
+  50: 45,
+};
+
+/**
+ * Returns the official exam timer duration (in minutes) for a given question count:
+ * - 5 questions: 3 minutes
+ * - 10 questions: 7 minutes
+ * - 20 questions: 15 minutes
+ * - 30 questions: 25 minutes
+ * - 50 questions: 45 minutes
+ */
+export function getTimerMinutesForQuestionCount(questionCount: number): QuizDuration {
+  if (questionCount in QUIZ_TIMER_MINUTES_BY_COUNT) {
+    return QUIZ_TIMER_MINUTES_BY_COUNT[questionCount];
+  }
+  if (questionCount <= 5) return 3;
+  if (questionCount <= 10) return 7;
+  if (questionCount <= 20) return 15;
+  if (questionCount <= 30) return 25;
+  return 45;
+}
 
 export type NavSection =
   | 'dashboard'
@@ -35,7 +85,7 @@ export interface QuizConfig {
   quizLanguage: LanguageCode;
   topic: string;
   difficulty: DifficultyLevel;
-  questionCount: 5 | 10 | 15 | 20 | 30;
+  questionCount: QuizQuestionCount;
   questionType: QuestionTypeFilter;
   durationMinutes: QuizDuration;
   mode: QuizMode;
@@ -55,7 +105,7 @@ export interface QuizQuestionClient {
   questionText: string;
   options: string[];
   hint?: string;
-  // Only populated after locking in Practice Mode or after final submission in Test Mode
+  // Populated after locking in Practice/Timed/Challenge Mode or after final submission in Exam Mode
   correctIndex?: number;
   explanation?: string;
 }
@@ -80,7 +130,7 @@ export interface LockedAnswerRecord {
   questionId: string;
   selectedIndex: number;
   lockedAt: string;
-  // Populated in Practice Mode immediately upon lock, or in Test Mode after final submit
+  // Populated immediately upon lock except in Exam Mode where it is populated after final submit
   isCorrect?: boolean;
   correctIndex?: number;
   explanation?: string;
@@ -119,6 +169,8 @@ export interface QuizAttemptState {
   startedAt: string;
   completedAt?: string;
   timeTakenSeconds: number;
+  timerStartedAtMs?: number;
+  timerEndsAtMs?: number;
   scoreSummary?: QuizScoreSummary;
   serverStateToken?: string;
   generationInfo: {
@@ -192,4 +244,3 @@ export interface ChatConversation {
   createdAt: string;
   updatedAt: string;
 }
-

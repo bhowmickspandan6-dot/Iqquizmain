@@ -37,6 +37,11 @@ import {
   QuizConfig,
   QuizDuration,
   QuizMode,
+  QuizQuestionCount,
+  QUIZ_QUESTION_COUNTS,
+  SelectableQuizMode,
+  getTimerMinutesForQuestionCount,
+  normalizeQuizMode,
   SavedStudyNote,
   StudyNoteAnalysis,
   SubjectId,
@@ -78,6 +83,11 @@ import {
   safeFetchJson,
   validateQuizAttemptPayload,
 } from './utils/apiClient';
+import {
+  attachInitialTimerToAttempt,
+  getOrInitAttemptTimer,
+  computeTimerSnapshot,
+} from './utils/quizTimer';
 
 const STORAGE_KEYS = {
   PREFS: 'eduquiz_prefs_v1',
@@ -138,12 +148,13 @@ export default function App() {
   const [selectedSubject, setSelectedSubject] = useState<SubjectId>('mathematics');
 
   // Quiz Configuration State (Section 6)
+  // Official timer mapping: 5Q -> 3m, 10Q -> 7m, 20Q -> 15m, 30Q -> 25m, 50Q -> 45m
   const [selectedTopic, setSelectedTopic] = useState<string>('All Verified Chapters');
   const [difficulty, setDifficulty] = useState<DifficultyLevel>('mixed');
-  const [questionCount, setQuestionCount] = useState<5 | 10 | 15 | 20 | 30>(5);
+  const [questionCount, setQuestionCount] = useState<QuizQuestionCount>(5);
   const [questionType, setQuestionType] = useState<QuestionTypeFilter>('mcq');
-  const [durationMinutes, setDurationMinutes] = useState<QuizDuration>(10);
-  const [quizMode, setQuizMode] = useState<QuizMode>('practice');
+  const [durationMinutes, setDurationMinutes] = useState<QuizDuration>(3);
+  const [quizMode, setQuizMode] = useState<QuizMode>('test');
 
   // Navigation & Mobile Drawer
   const [activeNav, setActiveNav] = useState<NavSection>('dashboard');
@@ -484,6 +495,7 @@ export default function App() {
   }, []);
 
   // Recover unfinished or active quiz attempt across page refresh (Sections 9 & 10)
+  // Preserves start/end timer timestamps so refreshing never resets the countdown
   useEffect(() => {
     const savedActiveId = localStorage.getItem(STORAGE_KEYS.ACTIVE_ATTEMPT_ID);
     if (!savedActiveId) return;
@@ -491,18 +503,36 @@ export default function App() {
     // Immediately restore from local history if present (works across Vercel serverless cold starts)
     const localMatch = attemptsHistory.find((a) => a.attemptId === savedActiveId);
     if (localMatch) {
-      setActiveAttempt(localMatch);
+      const withTimer =
+        localMatch.status === 'in_progress'
+          ? attachInitialTimerToAttempt(localMatch)
+          : localMatch;
+      setActiveAttempt(withTimer);
+      if (withTimer.status === 'in_progress') {
+        setActiveNav('take_quiz');
+      }
     }
 
     safeFetchJson<QuizAttemptState>(`/api/quiz/attempt/${savedActiveId}`)
       .then((recovered) => {
         const validated = validateQuizAttemptPayload(recovered);
-        setActiveAttempt(validated);
+        const hydrated =
+          validated.status === 'in_progress'
+            ? attachInitialTimerToAttempt({
+                ...validated,
+                timerStartedAtMs: localMatch?.timerStartedAtMs,
+                timerEndsAtMs: localMatch?.timerEndsAtMs,
+              })
+            : validated;
+        setActiveAttempt(hydrated);
+        if (hydrated.status === 'in_progress') {
+          setActiveNav('take_quiz');
+        }
         setAttemptsHistory((prev) => {
-          const exists = prev.some((a) => a.attemptId === validated.attemptId);
+          const exists = prev.some((a) => a.attemptId === hydrated.attemptId);
           return exists
-            ? prev.map((a) => (a.attemptId === validated.attemptId ? validated : a))
-            : [validated, ...prev];
+            ? prev.map((a) => (a.attemptId === hydrated.attemptId ? hydrated : a))
+            : [hydrated, ...prev];
         });
       })
       .catch(() => {
@@ -528,18 +558,28 @@ export default function App() {
 
   // Update helper for attemptsHistory & persistent questionHistory
   const upsertAttemptInHistory = (updated: QuizAttemptState) => {
-    setActiveAttempt(updated);
-    if (updated.status === 'in_progress') {
-      localStorage.setItem(STORAGE_KEYS.ACTIVE_ATTEMPT_ID, updated.attemptId);
+    const existing =
+      (activeAttempt && activeAttempt.attemptId === updated.attemptId ? activeAttempt : null) ||
+      attemptsHistory.find((a) => a.attemptId === updated.attemptId);
+
+    const preservedTimerAttempt: QuizAttemptState = {
+      ...updated,
+      timerStartedAtMs: updated.timerStartedAtMs ?? existing?.timerStartedAtMs,
+      timerEndsAtMs: updated.timerEndsAtMs ?? existing?.timerEndsAtMs,
+    };
+
+    setActiveAttempt(preservedTimerAttempt);
+    if (preservedTimerAttempt.status === 'in_progress') {
+      localStorage.setItem(STORAGE_KEYS.ACTIVE_ATTEMPT_ID, preservedTimerAttempt.attemptId);
     } else {
       localStorage.removeItem(STORAGE_KEYS.ACTIVE_ATTEMPT_ID);
     }
 
     setAttemptsHistory((prev) => {
-      const idx = prev.findIndex((a) => a.attemptId === updated.attemptId);
-      if (idx === -1) return [updated, ...prev];
+      const idx = prev.findIndex((a) => a.attemptId === preservedTimerAttempt.attemptId);
+      if (idx === -1) return [preservedTimerAttempt, ...prev];
       const copy = [...prev];
-      copy[idx] = updated;
+      copy[idx] = preservedTimerAttempt;
       return copy;
     });
 
@@ -645,8 +685,16 @@ export default function App() {
     }));
   };
 
-  // MANDATORY PRE-QUIZ LANGUAGE GATE:
-  // Opens the Language Selection Modal before EVERY new quiz attempt, subject quiz, practice test, random quiz, or retake.
+  const getLocalizedModeLabel = (rawMode?: string): string => {
+    const norm = normalizeQuizMode(rawMode);
+    if (norm === 'practice') return t(interfaceLanguage, 'modePractice');
+    if (norm === 'timed') return t(interfaceLanguage, 'modeTimed');
+    if (norm === 'challenge') return t(interfaceLanguage, 'modeChallenge');
+    return t(interfaceLanguage, 'modeExam');
+  };
+
+  // MANDATORY PRE-QUIZ MODE & LANGUAGE GATE:
+  // Opens the Quiz Mode & Language Selection Modal before EVERY new quiz attempt, subject quiz, practice test, random quiz, or retake.
   const requestQuizWithLanguageModal = (
     overrideConfig?: Partial<QuizConfig>,
     kind: 'standard' | 'random' | 'retake' | 'notes' = 'standard',
@@ -656,22 +704,32 @@ export default function App() {
     }
   ) => {
     setQuizGenError(null);
+    const resolvedCount = (overrideConfig?.questionCount ?? questionCount) as QuizQuestionCount;
+    const resolvedMode = normalizeQuizMode(overrideConfig?.mode ?? quizMode);
+    const resolvedDuration: QuizDuration =
+      resolvedMode === 'practice'
+        ? 0
+        : getTimerMinutesForQuestionCount(resolvedCount);
+
     setPendingLaunch({
       kind,
       classLevel: overrideConfig?.classLevel ?? selectedClass,
       subject: overrideConfig?.subject ?? selectedSubject,
       topic: overrideConfig?.topic ?? selectedTopic,
-      difficulty: overrideConfig?.difficulty ?? difficulty,
-      questionCount: overrideConfig?.questionCount ?? questionCount,
+      difficulty:
+        resolvedMode === 'challenge'
+          ? 'hard'
+          : overrideConfig?.difficulty ?? difficulty,
+      questionCount: resolvedCount,
       questionType: overrideConfig?.questionType ?? questionType,
-      durationMinutes: overrideConfig?.durationMinutes ?? durationMinutes,
-      mode: overrideConfig?.mode ?? quizMode,
+      durationMinutes: resolvedDuration,
+      mode: resolvedMode,
       originalAttemptId: extra?.originalAttemptId,
       noteMcqs: extra?.noteMcqs,
     });
   };
 
-  // Trigger a Random Quiz for the currently selected class (opens Language Selection Modal first!)
+  // Trigger a Random Quiz for the currently selected class (opens Mode & Language Selection Modal first!)
   const handleRequestRandomQuiz = () => {
     const randomSub =
       SUBJECT_LIST[Math.floor(Math.random() * SUBJECT_LIST.length)].id;
@@ -684,21 +742,33 @@ export default function App() {
         difficulty: 'mixed',
         questionCount: 5,
         questionType: 'mixed',
-        durationMinutes: 10,
-        mode: 'practice',
+        durationMinutes: 3,
+        mode: 'timed',
       },
       'random'
     );
   };
 
-  // Execute Quiz Generation ONLY after the student explicitly selects a language & clicks Continue in the modal
+  // Execute Quiz Generation ONLY after the student explicitly selects a Quiz Mode + Language & clicks Start Quiz in the modal
+  // CRITICAL: Do not generate questions or start the timer until the user clicks "Start Quiz"!
   const handleConfirmLanguageAndGenerate = async (
-    confirmedQuizLanguage: LanguageCode
+    confirmedQuizLanguage: LanguageCode,
+    confirmedQuizMode: SelectableQuizMode
   ) => {
     if (!pendingLaunch) return;
 
-    // Update the quizLanguage setting while keeping selectedClass, selectedSubject, and interfaceLanguage unchanged
+    const normalizedMode = normalizeQuizMode(confirmedQuizMode);
+    const resolvedDuration: QuizDuration =
+      normalizedMode === 'practice'
+        ? 0
+        : getTimerMinutesForQuestionCount(pendingLaunch.questionCount);
+    const resolvedDifficulty: DifficultyLevel =
+      normalizedMode === 'challenge' ? 'hard' : pendingLaunch.difficulty;
+
+    // Persist the chosen quizLanguage and quizMode for future defaults while keeping selectedClass, selectedSubject, and interfaceLanguage unchanged
     setQuizLanguage(confirmedQuizLanguage);
+    setQuizMode(normalizedMode);
+    setDurationMinutes(resolvedDuration);
     setQuizGenError(null);
     setGeneratingQuiz(true);
 
@@ -725,27 +795,30 @@ export default function App() {
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({
             originalAttemptId: pendingLaunch.originalAttemptId,
-            originalConfig: origAttempt?.config || {
+            originalConfig: {
+              ...(origAttempt?.config || {}),
               classLevel: pendingLaunch.classLevel,
               subject: pendingLaunch.subject,
               quizLanguage: confirmedQuizLanguage,
               topic: pendingLaunch.topic,
-              difficulty: pendingLaunch.difficulty,
+              difficulty: resolvedDifficulty,
               questionCount: pendingLaunch.questionCount,
               questionType: pendingLaunch.questionType,
-              durationMinutes: pendingLaunch.durationMinutes,
-              mode: pendingLaunch.mode,
+              durationMinutes: resolvedDuration,
+              mode: normalizedMode,
             },
             originalQuestions: origAttempt?.questions || [],
             serverStateToken: origAttempt?.serverStateToken,
             quizLanguage: confirmedQuizLanguage,
+            mode: normalizedMode,
             userId: effectiveUserId,
             clientExcludedFingerprints: allFingerprints,
             clientExcludedHistory: excludedHistoryForTarget,
           }),
         });
         const validated = validateQuizAttemptPayload(rawData);
-        upsertAttemptInHistory(validated);
+        const withFreshTimer = attachInitialTimerToAttempt(validated);
+        upsertAttemptInHistory(withFreshTimer);
         setPendingLaunch(null);
         setActiveNav('take_quiz');
         return;
@@ -755,7 +828,8 @@ export default function App() {
         pendingLaunch.kind === 'notes' &&
         pendingLaunch.noteMcqs &&
         pendingLaunch.noteMcqs.length > 0 &&
-        confirmedQuizLanguage === quizLanguage
+        confirmedQuizLanguage === quizLanguage &&
+        normalizedMode !== 'challenge'
       ) {
         const rawData = await safeFetchJson('/api/quiz/from-notes', {
           method: 'POST',
@@ -766,17 +840,19 @@ export default function App() {
             subject: pendingLaunch.subject,
             quizLanguage: confirmedQuizLanguage,
             topic: pendingLaunch.topic,
+            mode: normalizedMode,
             userId: effectiveUserId,
           }),
         });
         const validated = validateQuizAttemptPayload(rawData);
-        upsertAttemptInHistory(validated);
+        const withFreshTimer = attachInitialTimerToAttempt(validated);
+        upsertAttemptInHistory(withFreshTimer);
         setPendingLaunch(null);
         setActiveNav('take_quiz');
         return;
       }
 
-      // Standard / Random / Cross-language Note Quiz Generation in confirmedQuizLanguage
+      // Standard / Random / Challenge / Cross-language Note Quiz Generation in confirmedQuizLanguage & confirmedQuizMode
       const rawData = await safeFetchJson('/api/quiz/generate', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -785,22 +861,23 @@ export default function App() {
           subject: pendingLaunch.subject,
           quizLanguage: confirmedQuizLanguage,
           topic: pendingLaunch.topic,
-          difficulty: pendingLaunch.difficulty,
+          difficulty: resolvedDifficulty,
           questionCount: pendingLaunch.questionCount,
           questionType: pendingLaunch.questionType,
-          durationMinutes: pendingLaunch.durationMinutes,
-          mode: pendingLaunch.mode,
+          durationMinutes: resolvedDuration,
+          mode: normalizedMode,
           userId: effectiveUserId,
           clientExcludedFingerprints: allFingerprints,
           clientExcludedHistory: excludedHistoryForTarget,
         }),
       });
       const validated = validateQuizAttemptPayload(rawData);
-      upsertAttemptInHistory(validated);
+      const withFreshTimer = attachInitialTimerToAttempt(validated);
+      upsertAttemptInHistory(withFreshTimer);
       setPendingLaunch(null);
       setActiveNav('take_quiz');
     } catch (err: any) {
-      // Keep pendingLaunch open so student can retry without losing class, subject, or language selection
+      // Keep pendingLaunch open so student can retry without losing class, subject, mode, or language selection
       setQuizGenError(err?.message || t(interfaceLanguage, 'genErrorTitle'));
     } finally {
       setGeneratingQuiz(false);
@@ -858,7 +935,7 @@ export default function App() {
 
   // Submit Final Quiz Attempt
   const handleSubmitQuiz = async (elapsedSeconds: number) => {
-    if (!activeAttempt) return;
+    if (!activeAttempt || activeAttempt.status === 'completed') return;
     const data = await safeFetchJson<QuizAttemptState>('/api/quiz/submit', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -873,20 +950,54 @@ export default function App() {
     upsertAttemptInHistory(validated);
   };
 
+  // Background timer guard: if a timed quiz is in progress and the user accidentally navigated to another tab,
+  // still enforce automatic submission when the end timestamp is reached.
+  useEffect(() => {
+    if (
+      !activeAttempt ||
+      activeAttempt.status !== 'in_progress' ||
+      !(activeAttempt.config.durationMinutes > 0) ||
+      activeNav === 'take_quiz'
+    ) {
+      return;
+    }
+
+    const timerRec = getOrInitAttemptTimer(activeAttempt);
+    if (timerRec.totalAllowedSeconds <= 0) return;
+
+    const checkBackgroundExpiry = () => {
+      const snap = computeTimerSnapshot(timerRec, Date.now());
+      if (snap.isExpired) {
+        handleSubmitQuiz(timerRec.totalAllowedSeconds).catch(() => {});
+      }
+    };
+
+    checkBackgroundExpiry();
+    const id = window.setInterval(checkBackgroundExpiry, 1000);
+    return () => window.clearInterval(id);
+  }, [activeAttempt, activeNav]);
+
   // Retake Quiz — Opens the Mandatory Language Selection Modal FIRST, preserving original attempt
   const handleRetakeQuiz = async (originalAttemptId: string) => {
     const orig =
       attemptsHistory.find((a) => a.attemptId === originalAttemptId) || activeAttempt;
+    const qCount = ((orig?.questions.length as any) || 5) as QuizQuestionCount;
+    const origMode = orig?.config.mode ?? 'test';
+    const origDur =
+      orig?.config.durationMinutes === 0 && origMode === 'practice'
+        ? 0
+        : getTimerMinutesForQuestionCount(qCount);
+
     requestQuizWithLanguageModal(
       {
         classLevel: orig?.config.classLevel ?? selectedClass,
         subject: orig?.config.subject ?? selectedSubject,
         topic: orig?.config.topic ?? 'All Verified Chapters',
         difficulty: (orig?.config.difficulty as DifficultyLevel) ?? 'mixed',
-        questionCount: (orig?.questions.length as any) ?? 5,
+        questionCount: qCount,
         questionType: (orig?.config.questionType as QuestionTypeFilter) ?? 'mcq',
-        durationMinutes: (orig?.config.durationMinutes as QuizDuration) ?? 10,
-        mode: orig?.config.mode ?? 'practice',
+        durationMinutes: origDur,
+        mode: origMode,
       },
       'retake',
       { originalAttemptId }
@@ -902,15 +1013,16 @@ export default function App() {
     topicName: string
   ) => {
     setQuizLanguage(qLang);
+    const count = ((mcqs.length as any) || 5) as QuizQuestionCount;
     requestQuizWithLanguageModal(
       {
         classLevel: cls,
         subject: sub,
         topic: topicName,
         difficulty: 'mixed',
-        questionCount: (mcqs.length as any) || 5,
+        questionCount: count,
         questionType: 'mcq',
-        durationMinutes: 10,
+        durationMinutes: getTimerMinutesForQuestionCount(count),
         mode: 'practice',
       },
       'notes',
@@ -1231,6 +1343,83 @@ export default function App() {
     };
   }, []);
 
+  // Lock entire background UI, body overflow, touch scrolling, wheel scrolling, and keyboard navigation while quiz generation is in progress
+  useEffect(() => {
+    if (!generatingQuiz) {
+      document.documentElement.removeAttribute('data-quiz-generating');
+      document.body.style.overflow = '';
+      document.documentElement.style.overflow = '';
+      document.body.style.overscrollBehavior = '';
+      document.documentElement.style.overscrollBehavior = '';
+      document.body.style.touchAction = '';
+      document.documentElement.style.touchAction = '';
+      return;
+    }
+
+    setMobileMenuOpen(false);
+    if (document.activeElement instanceof HTMLElement) {
+      document.activeElement.blur();
+    }
+
+    const prevBodyOverflow = document.body.style.overflow;
+    const prevHtmlOverflow = document.documentElement.style.overflow;
+    const prevBodyOverscroll = document.body.style.overscrollBehavior;
+    const prevHtmlOverscroll = document.documentElement.style.overscrollBehavior;
+    const prevBodyTouchAction = document.body.style.touchAction;
+    const prevHtmlTouchAction = document.documentElement.style.touchAction;
+
+    document.documentElement.setAttribute('data-quiz-generating', 'true');
+    document.body.style.overflow = 'hidden';
+    document.documentElement.style.overflow = 'hidden';
+    document.body.style.overscrollBehavior = 'none';
+    document.documentElement.style.overscrollBehavior = 'none';
+    document.body.style.touchAction = 'none';
+    document.documentElement.style.touchAction = 'none';
+
+    const blockScrollAndTouch = (e: Event) => {
+      e.preventDefault();
+      e.stopPropagation();
+    };
+
+    const blockKeyboardWhileGenerating = (e: KeyboardEvent) => {
+      const blockedKeys = [
+        'Escape',
+        'Tab',
+        ' ',
+        'Enter',
+        'PageUp',
+        'PageDown',
+        'Home',
+        'End',
+        'ArrowUp',
+        'ArrowDown',
+        'ArrowLeft',
+        'ArrowRight',
+      ];
+      if (blockedKeys.includes(e.key)) {
+        e.preventDefault();
+        e.stopPropagation();
+      }
+    };
+
+    window.addEventListener('touchmove', blockScrollAndTouch, { passive: false, capture: true });
+    window.addEventListener('wheel', blockScrollAndTouch, { passive: false, capture: true });
+    window.addEventListener('keydown', blockKeyboardWhileGenerating, { capture: true });
+
+    return () => {
+      window.removeEventListener('touchmove', blockScrollAndTouch, { capture: true });
+      window.removeEventListener('wheel', blockScrollAndTouch, { capture: true });
+      window.removeEventListener('keydown', blockKeyboardWhileGenerating, { capture: true });
+      document.documentElement.removeAttribute('data-quiz-generating');
+      document.body.style.overflow = prevBodyOverflow;
+      document.documentElement.style.overflow = prevHtmlOverflow;
+      document.body.style.overscrollBehavior = prevBodyOverscroll;
+      document.documentElement.style.overscrollBehavior = prevHtmlOverscroll;
+      document.body.style.touchAction = prevBodyTouchAction;
+      document.documentElement.style.touchAction = prevHtmlTouchAction;
+    };
+  }, [generatingQuiz]);
+
   return (
     <MotionConfig reducedMotion="user">
       <div className="min-h-screen flex bg-[#F8FAFC] text-slate-900 select-none">
@@ -1250,7 +1439,13 @@ export default function App() {
         />
 
         {/* Desktop Sidebar Navigation (260px) */}
-        <aside className="hidden lg:flex lg:flex-col lg:w-64 lg:fixed lg:inset-y-0 bg-[#0F172A] text-white border-r border-slate-800 z-30">
+        <aside
+          inert={generatingQuiz ? true : undefined}
+          aria-hidden={generatingQuiz ? true : undefined}
+          className={`hidden lg:flex lg:flex-col lg:w-64 lg:fixed lg:inset-y-0 bg-[#0F172A] text-white border-r border-slate-800 z-30 ${
+            generatingQuiz ? 'pointer-events-none select-none' : ''
+          }`}
+        >
           {/* Brand Header */}
           <div className="px-6 py-5 border-b border-slate-800/80 flex items-center gap-3">
             <div className="w-9 h-9 rounded-lg bg-indigo-600 flex items-center justify-center text-white font-extrabold text-xs tracking-tight shrink-0 shadow-xs">
@@ -1446,7 +1641,13 @@ export default function App() {
         </AnimatePresence>
 
         {/* Main Content Area */}
-        <div className="flex-1 lg:pl-64 flex flex-col min-w-0">
+        <div
+          inert={generatingQuiz ? true : undefined}
+          aria-hidden={generatingQuiz ? true : undefined}
+          className={`flex-1 lg:pl-64 flex flex-col min-w-0 ${
+            generatingQuiz ? 'pointer-events-none select-none' : ''
+          }`}
+        >
           {/* Top Bar (Clean 3-Zone Contract: Context Breadcrumb — Independent Selectors — Primary CTA) */}
           <header className="sticky top-0 z-20 bg-white/95 backdrop-blur border-b border-slate-200 px-4 sm:px-8 py-3.5 flex items-center justify-between gap-4">
             {/* Zone 1: Mobile Menu Trigger & Brand / Active Section Breadcrumb */}
@@ -1897,7 +2098,7 @@ export default function App() {
                               </div>
                               <div className="text-xs text-slate-500">
                                 Quiz Language: {LANGUAGE_LABELS[att.config.quizLanguage]} ·{' '}
-                                {att.config.mode.toUpperCase()} ·{' '}
+                                {getLocalizedModeLabel(att.config.mode)} ·{' '}
                                 {new Date(att.completedAt || att.startedAt).toLocaleDateString()}
                               </div>
                             </div>
@@ -2132,12 +2333,12 @@ export default function App() {
                     </p>
                   </div>
 
-                  {/* 3. Quiz Language Notice (Selected in the 3-Language Screen upon clicking Start Quiz) */}
+                  {/* 3. Pre-Quiz Mode & Language Notice (Selected in the Pre-Quiz Setup Screen before every quiz starts) */}
                   <div className="p-3.5 rounded-xl bg-indigo-50/60 border border-indigo-200 flex items-center gap-3 text-xs text-indigo-950">
                     <Languages className="w-4 h-4 text-indigo-600 shrink-0" />
                     <span>
-                      <strong>{t(interfaceLanguage, 'quizLangLabel')}:</strong>{' '}
-                      {t(interfaceLanguage, 'langModalSubtitle')} (🇬🇧 English · বাংলা · हिन्दी)
+                      <strong>{t(interfaceLanguage, 'selectModePrompt')} & {t(interfaceLanguage, 'quizLangLabel')}:</strong>{' '}
+                      {t(interfaceLanguage, 'langModalSubtitle')} ({t(interfaceLanguage, 'modePractice')} · {t(interfaceLanguage, 'modeTimed')} · {t(interfaceLanguage, 'modeExam')} · {t(interfaceLanguage, 'modeChallenge')})
                     </span>
                   </div>
 
@@ -2162,14 +2363,14 @@ export default function App() {
                     </select>
                   </div>
 
-                  {/* 5, 6, 7, 8: Difficulty, Question Count, Question Type, Duration */}
-                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-5">
+                  {/* 5, 6, 7: Difficulty, Question Count, Question Type */}
+                  <div className="grid grid-cols-1 sm:grid-cols-3 gap-5">
                     {/* Difficulty */}
                     <div className="space-y-2">
                       <label className="block text-xs font-bold text-slate-800">
                         {t(interfaceLanguage, 'selectDifficultyPrompt')}
                       </label>
-                      <div className="grid grid-cols-2 sm:grid-cols-4 gap-1.5">
+                      <div className="grid grid-cols-2 gap-1.5">
                         {(
                           [
                             ['easy', t(interfaceLanguage, 'diffEasy')],
@@ -2194,26 +2395,42 @@ export default function App() {
                       </div>
                     </div>
 
-                    {/* Number of Questions */}
+                    {/* Number of Questions (5->3m, 10->7m, 20->15m, 30->25m, 50->45m) */}
                     <div className="space-y-2">
                       <label className="block text-xs font-bold text-slate-800">
                         {t(interfaceLanguage, 'selectCountPrompt')}
                       </label>
                       <div className="grid grid-cols-5 gap-1.5">
-                        {([5, 10, 15, 20, 30] as const).map((cnt) => (
-                          <button
-                            key={cnt}
-                            type="button"
-                            onClick={() => setQuestionCount(cnt)}
-                            className={`py-2 px-2 rounded-lg border text-xs font-bold tabular-nums cursor-pointer ${
-                              questionCount === cnt
-                                ? 'bg-slate-900 border-slate-900 text-white'
-                                : 'bg-white border-slate-200 text-slate-700 hover:border-slate-400'
-                            }`}
-                          >
-                            {cnt}
-                          </button>
-                        ))}
+                        {QUIZ_QUESTION_COUNTS.map((cnt) => {
+                          const mins = getTimerMinutesForQuestionCount(cnt);
+                          const isSelected = questionCount === cnt;
+                          return (
+                            <button
+                              key={cnt}
+                              type="button"
+                              onClick={() => {
+                                setQuestionCount(cnt);
+                                if (quizMode !== 'practice') {
+                                  setDurationMinutes(mins);
+                                }
+                              }}
+                              className={`py-2 px-1.5 rounded-lg border text-xs font-bold tabular-nums cursor-pointer flex flex-col items-center justify-center leading-tight ${
+                                isSelected
+                                  ? 'bg-slate-900 border-slate-900 text-white'
+                                  : 'bg-white border-slate-200 text-slate-700 hover:border-slate-400'
+                              }`}
+                            >
+                              <span>{cnt} Q</span>
+                              <span
+                                className={`text-[10px] font-medium mt-0.5 ${
+                                  isSelected ? 'text-slate-300' : 'text-slate-500'
+                                }`}
+                              >
+                                {mins}m
+                              </span>
+                            </button>
+                          );
+                        })}
                       </div>
                     </div>
 
@@ -2245,78 +2462,6 @@ export default function App() {
                         ))}
                       </div>
                     </div>
-
-                    {/* Duration */}
-                    <div className="space-y-2">
-                      <label className="block text-xs font-bold text-slate-800">
-                        {t(interfaceLanguage, 'selectDurationPrompt')}
-                      </label>
-                      <div className="grid grid-cols-4 gap-1.5">
-                        {(
-                          [
-                            [0, t(interfaceLanguage, 'durUntimed')],
-                            [10, '10m'],
-                            [20, '20m'],
-                            [30, '30m'],
-                          ] as [QuizDuration, string][]
-                        ).map(([val, label]) => (
-                          <button
-                            key={val}
-                            type="button"
-                            onClick={() => setDurationMinutes(val)}
-                            className={`py-2 px-2 rounded-lg border text-xs font-semibold tabular-nums cursor-pointer ${
-                              durationMinutes === val
-                                ? 'bg-slate-900 border-slate-900 text-white'
-                                : 'bg-white border-slate-200 text-slate-700 hover:border-slate-400'
-                            }`}
-                          >
-                            {label}
-                          </button>
-                        ))}
-                      </div>
-                    </div>
-                  </div>
-
-                  {/* 9. Assessment Mode (Practice vs Test Mode) */}
-                  <div className="space-y-2">
-                    <label className="block text-xs font-bold text-slate-800">
-                      {t(interfaceLanguage, 'selectModePrompt')}
-                    </label>
-                    <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
-                      <button
-                        type="button"
-                        onClick={() => setQuizMode('practice')}
-                        className={`p-4 rounded-xl border text-left space-y-1 cursor-pointer ${
-                          quizMode === 'practice'
-                            ? 'border-indigo-600 bg-indigo-50/50 ring-1 ring-indigo-600'
-                            : 'border-slate-200 bg-white hover:border-slate-300'
-                        }`}
-                      >
-                        <div className="font-bold text-sm text-slate-900">
-                          {t(interfaceLanguage, 'modePractice')}
-                        </div>
-                        <p className="text-xs text-slate-600 leading-relaxed">
-                          {t(interfaceLanguage, 'modePracticeDesc')}
-                        </p>
-                      </button>
-
-                      <button
-                        type="button"
-                        onClick={() => setQuizMode('test')}
-                        className={`p-4 rounded-xl border text-left space-y-1 cursor-pointer ${
-                          quizMode === 'test'
-                            ? 'border-indigo-600 bg-indigo-50/50 ring-1 ring-indigo-600'
-                            : 'border-slate-200 bg-white hover:border-slate-300'
-                        }`}
-                      >
-                        <div className="font-bold text-sm text-slate-900">
-                          {t(interfaceLanguage, 'modeTest')}
-                        </div>
-                        <p className="text-xs text-slate-600 leading-relaxed">
-                          {t(interfaceLanguage, 'modeTestDesc')}
-                        </p>
-                      </button>
-                    </div>
                   </div>
 
                   {/* Strict Answer Locking Notice */}
@@ -2340,9 +2485,7 @@ export default function App() {
                       onClick={() => requestQuizWithLanguageModal()}
                       className="px-5 py-3 rounded-xl border border-slate-300 bg-white hover:bg-slate-50 text-slate-900 font-semibold text-sm flex items-center gap-2 cursor-pointer disabled:opacity-50"
                     >
-                      <RefreshCw
-                        className={`w-4 h-4 ${generatingQuiz ? 'animate-spin' : ''}`}
-                      />
+                      <RefreshCw className="w-4 h-4" />
                       {t(interfaceLanguage, 'generateNewQuizBtn')}
                     </button>
 
@@ -2353,9 +2496,7 @@ export default function App() {
                       className="px-6 py-3 rounded-xl bg-slate-900 hover:bg-slate-800 text-white font-semibold text-sm flex items-center gap-2 cursor-pointer disabled:opacity-50"
                     >
                       <Sparkles className="w-4 h-4" />
-                      {generatingQuiz
-                        ? t(interfaceLanguage, 'generatingQuizMsg')
-                        : t(interfaceLanguage, 'startQuizBtn')}
+                      {t(interfaceLanguage, 'startQuizBtn')}
                     </button>
                   </div>
                 </div>
@@ -2442,13 +2583,13 @@ export default function App() {
                               difficulty: 'mixed',
                               questionCount: 10,
                               questionType: 'mixed',
-                              durationMinutes: 10,
+                              durationMinutes: 7,
                               mode: 'test',
                             })
                           }
                           className="flex-1 py-2.5 px-3 rounded-lg bg-slate-900 hover:bg-slate-800 text-white text-xs font-semibold cursor-pointer text-center"
                         >
-                          {t(interfaceLanguage, 'launchTestModeBtn')} (10 Q · 10m)
+                          {t(interfaceLanguage, 'launchTestModeBtn')} (10 Q · 7m)
                         </button>
 
                         <button
@@ -2468,7 +2609,7 @@ export default function App() {
                           }
                           className="flex-1 py-2.5 px-3 rounded-lg border border-slate-300 bg-white hover:bg-slate-50 text-slate-800 text-xs font-semibold cursor-pointer text-center"
                         >
-                          {t(interfaceLanguage, 'launchPracticeModeBtn')} (5 Q)
+                          {t(interfaceLanguage, 'launchPracticeModeBtn')} (5 Q · {t(interfaceLanguage, 'durUntimed')})
                         </button>
                       </div>
                     </div>
@@ -2591,8 +2732,8 @@ export default function App() {
                               <td className="py-3 px-4 text-xs font-semibold text-indigo-700">
                                 {LANGUAGE_LABELS[att.config.quizLanguage]}
                               </td>
-                              <td className="py-3 px-4 text-xs text-slate-600">
-                                {att.config.mode.toUpperCase()}
+                              <td className="py-3 px-4 text-xs font-semibold text-slate-700">
+                                {getLocalizedModeLabel(att.config.mode)}
                               </td>
                               <td className="py-3 px-4 text-right font-mono tabular-nums text-xs">
                                 {lockedCnt}/{att.questions.length}
