@@ -688,3 +688,10 @@ export function getClassSubjectCurriculum(
   const sub = getSubjectDefinition(subjectId);
   return sub.curriculumByClass[classLevel];
 }
+
+export function getSubjectsForClass(classLevel: ClassLevel): SubjectDefinition[] {
+  return SUBJECT_LIST.filter((sub) => {
+    const classCurr = sub.curriculumByClass[classLevel];
+    return Boolean(classCurr && Array.isArray(classCurr.chapters) && classCurr.chapters.length > 0);
+  });
+}

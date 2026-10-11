@@ -51,6 +51,7 @@ import {
   SUBJECT_LIST,
   getClassSubjectCurriculum,
   getSubjectDefinition,
+  getSubjectsForClass,
 } from './data/curriculum';
 import { LANGUAGE_LABELS, t } from './i18n/translations';
 import { ActiveQuizView } from './components/ActiveQuizView';
@@ -702,6 +703,7 @@ export default function App() {
     extra?: {
       originalAttemptId?: string;
       noteMcqs?: StudyNoteAnalysis['mcqs'];
+      skipSubjectStep?: boolean;
     }
   ) => {
     if (generatingQuiz || quizGenInFlightRef.current) return;
@@ -728,19 +730,33 @@ export default function App() {
       mode: resolvedMode,
       originalAttemptId: extra?.originalAttemptId,
       noteMcqs: extra?.noteMcqs,
+      skipSubjectStep: Boolean(extra?.skipSubjectStep),
     });
   };
 
-  // Trigger a Random Quiz for the currently selected class (opens Mode & Language Selection Modal first!)
+  // Trigger a Random Quiz for the currently selected class:
+  // Randomly chooses an appropriate WBBSE subject and chapter for the user's selected class and opens the direct Select Quiz Language modal
   const handleRequestRandomQuiz = () => {
-    const randomSub =
-      SUBJECT_LIST[Math.floor(Math.random() * SUBJECT_LIST.length)].id;
-    setSelectedSubject(randomSub);
+    const classSubjects = getSubjectsForClass(selectedClass);
+    const prescribedSubjects = classSubjects.filter(
+      (s) => s.curriculumByClass[selectedClass]?.status === 'prescribed'
+    );
+    const candidateSubjects =
+      prescribedSubjects.length > 0 ? prescribedSubjects : classSubjects;
+    const randomSubDef =
+      candidateSubjects[Math.floor(Math.random() * candidateSubjects.length)] ||
+      SUBJECT_LIST[0];
+    const chapters = randomSubDef.curriculumByClass[selectedClass]?.chapters || [];
+    const randomChapter =
+      chapters.length > 0
+        ? chapters[Math.floor(Math.random() * chapters.length)]
+        : null;
+
     requestQuizWithLanguageModal(
       {
         classLevel: selectedClass,
-        subject: randomSub,
-        topic: 'All Verified Chapters',
+        subject: randomSubDef.id,
+        topic: randomChapter ? randomChapter.title.en : 'All Verified Chapters',
         difficulty: 'mixed',
         questionCount: 5,
         questionType: 'mixed',
@@ -751,16 +767,50 @@ export default function App() {
     );
   };
 
-  // Execute Quiz Generation ONLY after the student explicitly selects a Quiz Mode (Step 1) + Language (Step 2) & clicks Start Quiz (Step 3)
+  // Launch Quick 5-Q Practice from a Dashboard subject card:
+  // Step 1: Select Quiz Mode -> Step 2: Select Quiz Language -> Step 3: Generate 5-Q Quiz for the clicked card's subject & class (no Subject Selection step)
+  const handleQuickPracticeSubjectCard = (targetSubject: SubjectId) => {
+    setSelectedSubject(targetSubject);
+    requestQuizWithLanguageModal(
+      {
+        classLevel: selectedClass,
+        subject: targetSubject,
+        topic: 'All Verified Chapters',
+        difficulty: 'mixed',
+        questionCount: 5,
+        questionType: 'mcq',
+        durationMinutes: 0,
+        mode: 'practice',
+      },
+      'standard',
+      { skipSubjectStep: true }
+    );
+  };
+
+  // Execute Quiz Generation ONLY after the student explicitly selects a Quiz Mode (Step 1) + Language (Step 2) + Subject (Step 3) & clicks Start Quiz (Step 4)
   // CRITICAL: Do not generate questions or start the timer until the user clicks "Start Quiz"!
   const handleConfirmLanguageAndGenerate = async (
     confirmedQuizLanguage: LanguageCode,
-    confirmedQuizMode: SelectableQuizMode
+    confirmedQuizMode: SelectableQuizMode,
+    confirmedSubject?: SubjectId
   ) => {
     if (!pendingLaunch || generatingQuiz || quizGenInFlightRef.current) return;
     quizGenInFlightRef.current = true;
 
     const normalizedMode = normalizeQuizMode(confirmedQuizMode);
+    const resolvedSubject: SubjectId = confirmedSubject ?? pendingLaunch.subject;
+    const targetCurriculum = getClassSubjectCurriculum(
+      pendingLaunch.classLevel,
+      resolvedSubject
+    );
+    const topicBelongsToSubject =
+      pendingLaunch.topic === 'All Verified Chapters' ||
+      targetCurriculum.chapters.some((ch) => ch.title.en === pendingLaunch.topic);
+    const resolvedTopic =
+      resolvedSubject === pendingLaunch.subject && topicBelongsToSubject
+        ? pendingLaunch.topic
+        : 'All Verified Chapters';
+
     const resolvedDuration: QuizDuration =
       normalizedMode === 'practice'
         ? 0
@@ -768,7 +818,7 @@ export default function App() {
     const resolvedDifficulty: DifficultyLevel =
       normalizedMode === 'challenge' ? 'hard' : pendingLaunch.difficulty;
 
-    // Persist the chosen quizLanguage and quizMode for future defaults while keeping selectedClass, selectedSubject, and interfaceLanguage unchanged
+    // Persist the chosen quizLanguage and quizMode while keeping selectedClass, dashboard selectedSubject, and interfaceLanguage unchanged
     setQuizLanguage(confirmedQuizLanguage);
     setQuizMode(normalizedMode);
     setDurationMinutes(resolvedDuration);
@@ -778,8 +828,8 @@ export default function App() {
     try {
       const excludedHistoryForTarget = buildExcludedHistoryPayload(
         pendingLaunch.classLevel,
-        pendingLaunch.subject,
-        pendingLaunch.topic
+        resolvedSubject,
+        resolvedTopic
       );
       const allFingerprints = Array.from(
         new Set([
@@ -788,7 +838,11 @@ export default function App() {
         ])
       );
 
-      if (pendingLaunch.kind === 'retake' && pendingLaunch.originalAttemptId) {
+      if (
+        pendingLaunch.kind === 'retake' &&
+        pendingLaunch.originalAttemptId &&
+        resolvedSubject === pendingLaunch.subject
+      ) {
         const origAttempt =
           attemptsHistory.find((a) => a.attemptId === pendingLaunch.originalAttemptId) ||
           (activeAttempt?.attemptId === pendingLaunch.originalAttemptId ? activeAttempt : null);
@@ -801,9 +855,9 @@ export default function App() {
             originalConfig: {
               ...(origAttempt?.config || {}),
               classLevel: pendingLaunch.classLevel,
-              subject: pendingLaunch.subject,
+              subject: resolvedSubject,
               quizLanguage: confirmedQuizLanguage,
-              topic: pendingLaunch.topic,
+              topic: resolvedTopic,
               difficulty: resolvedDifficulty,
               questionCount: pendingLaunch.questionCount,
               questionType: pendingLaunch.questionType,
@@ -831,6 +885,7 @@ export default function App() {
         pendingLaunch.kind === 'notes' &&
         pendingLaunch.noteMcqs &&
         pendingLaunch.noteMcqs.length > 0 &&
+        resolvedSubject === pendingLaunch.subject &&
         confirmedQuizLanguage === quizLanguage &&
         normalizedMode !== 'challenge'
       ) {
@@ -840,9 +895,9 @@ export default function App() {
           body: JSON.stringify({
             mcqs: pendingLaunch.noteMcqs,
             classLevel: pendingLaunch.classLevel,
-            subject: pendingLaunch.subject,
+            subject: resolvedSubject,
             quizLanguage: confirmedQuizLanguage,
-            topic: pendingLaunch.topic,
+            topic: resolvedTopic,
             mode: normalizedMode,
             userId: effectiveUserId,
           }),
@@ -855,15 +910,15 @@ export default function App() {
         return;
       }
 
-      // Standard / Random / Challenge / Cross-language Note Quiz Generation in confirmedQuizLanguage & confirmedQuizMode
+      // Standard / Random / Challenge / Cross-language Note Quiz Generation in confirmedQuizLanguage, confirmedQuizMode & resolvedSubject
       const rawData = await safeFetchJson('/api/quiz/generate', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           classLevel: pendingLaunch.classLevel,
-          subject: pendingLaunch.subject,
+          subject: resolvedSubject,
           quizLanguage: confirmedQuizLanguage,
-          topic: pendingLaunch.topic,
+          topic: resolvedTopic,
           difficulty: resolvedDifficulty,
           questionCount: pendingLaunch.questionCount,
           questionType: pendingLaunch.questionType,
@@ -1652,24 +1707,24 @@ export default function App() {
             generatingQuiz ? 'pointer-events-none select-none' : ''
           }`}
         >
-          {/* Top Bar (Clean 3-Zone Contract: Context Breadcrumb — Independent Selectors — Primary CTA) */}
-          <header className="sticky top-0 z-20 bg-white/95 backdrop-blur border-b border-slate-200 px-4 sm:px-8 py-3.5 flex items-center justify-between gap-4">
+          {/* Top Bar (Context Breadcrumb — Independent Selectors — Smart Learning Visual Badge) */}
+          <header className="sticky top-0 z-20 bg-white/95 backdrop-blur border-b border-slate-200 px-3 sm:px-6 lg:px-8 py-3 sm:py-3.5 min-h-[60px] flex items-center justify-between gap-2 sm:gap-4">
             {/* Zone 1: Mobile Menu Trigger & Brand / Active Section Breadcrumb */}
-            <div className="flex items-center gap-3 min-w-0">
+            <div className="flex items-center gap-2 sm:gap-3 min-w-0 flex-1">
               <button
                 type="button"
                 onClick={() => setMobileMenuOpen(true)}
-                className="lg:hidden p-2 rounded-lg border border-slate-200 text-slate-700 hover:bg-slate-50 cursor-pointer"
+                className="lg:hidden p-2 rounded-lg border border-slate-200 text-slate-700 hover:bg-slate-50 cursor-pointer shrink-0"
                 aria-label="Open navigation"
               >
                 <Menu className="w-5 h-5" />
               </button>
-              <div className="flex items-center gap-2 text-sm font-bold text-slate-900 whitespace-nowrap shrink-0">
+              <div className="flex items-center gap-1.5 sm:gap-2 text-sm font-bold text-slate-900 whitespace-nowrap min-w-0 flex-1">
                 <span className="w-6 h-6 rounded-md bg-indigo-600 text-white text-[11px] font-extrabold flex items-center justify-center tracking-tight shrink-0">
                   IQ
                 </span>
-                <span>{t(interfaceLanguage, 'brandName')}</span>
-                <span className="text-slate-300 font-normal">/</span>
+                <span className="shrink-0">{t(interfaceLanguage, 'brandName')}</span>
+                <span className="text-slate-300 font-normal shrink-0">/</span>
                 <AnimatePresence mode="wait">
                   <motion.span
                     key={activeNav}
@@ -1677,7 +1732,7 @@ export default function App() {
                     animate={{ opacity: 1, y: 0 }}
                     exit={{ opacity: 0, y: -4 }}
                     transition={{ duration: 0.14 }}
-                    className="text-indigo-700 inline-block"
+                    className="text-indigo-700 inline-block whitespace-nowrap shrink-0"
                   >
                     {navItems.find((n) => n.id === activeNav)?.label}
                   </motion.span>
@@ -1685,59 +1740,60 @@ export default function App() {
               </div>
             </div>
 
-          {/* Zone 2: Independent Class, Interface Language, and Quiz Language Controls */}
-          <div className="hidden md:flex items-center gap-4 text-xs">
-            {/* Class Selector */}
-            <div className="flex items-center gap-1.5">
-              <span className="text-slate-500 font-medium whitespace-nowrap">
-                {t(interfaceLanguage, 'classLabel')}:
-              </span>
-              <select
-                aria-label="Select Class"
-                value={selectedClass}
-                onChange={(e) => setSelectedClass(Number(e.target.value) as ClassLevel)}
-                className="px-2.5 py-1.5 rounded-lg border border-slate-200 bg-slate-50 font-semibold text-slate-900 cursor-pointer"
-              >
-                {CLASS_LEVELS.map((cls) => (
-                  <option key={cls} value={cls}>
-                    Class {cls}
-                  </option>
-                ))}
-              </select>
+            {/* Zone 2: Independent Class & Interface Language Controls */}
+            <div className="hidden md:flex items-center gap-2.5 lg:gap-4 text-xs shrink-0">
+              {/* Class Selector */}
+              <div className="flex items-center gap-1.5">
+                <span className="text-slate-500 font-medium whitespace-nowrap">
+                  {t(interfaceLanguage, 'classLabel')}:
+                </span>
+                <select
+                  aria-label="Select Class"
+                  value={selectedClass}
+                  onChange={(e) => setSelectedClass(Number(e.target.value) as ClassLevel)}
+                  className="px-2.5 py-1.5 rounded-lg border border-slate-200 bg-slate-50 font-semibold text-slate-900 cursor-pointer"
+                >
+                  {CLASS_LEVELS.map((cls) => (
+                    <option key={cls} value={cls}>
+                      Class {cls}
+                    </option>
+                  ))}
+                </select>
+              </div>
+
+              {/* Independent Interface Language Selector */}
+              <div className="flex items-center gap-1.5">
+                <Globe className="w-3.5 h-3.5 text-slate-500 shrink-0" />
+                <span className="text-slate-500 font-medium whitespace-nowrap">
+                  {t(interfaceLanguage, 'interfaceLangLabel')}:
+                </span>
+                <select
+                  aria-label="Interface Language"
+                  value={interfaceLanguage}
+                  onChange={(e) => setInterfaceLanguage(e.target.value as LanguageCode)}
+                  className="px-2.5 py-1.5 rounded-lg border border-slate-200 bg-slate-50 font-semibold text-slate-900 cursor-pointer"
+                >
+                  {(['en', 'bn', 'hi'] as LanguageCode[]).map((l) => (
+                    <option key={l} value={l}>
+                      {LANGUAGE_LABELS[l]}
+                    </option>
+                  ))}
+                </select>
+              </div>
             </div>
 
-            {/* Independent Interface Language Selector */}
-            <div className="flex items-center gap-1.5">
-              <Globe className="w-3.5 h-3.5 text-slate-500 shrink-0" />
-              <span className="text-slate-500 font-medium whitespace-nowrap">
-                {t(interfaceLanguage, 'interfaceLangLabel')}:
-              </span>
-              <select
-                aria-label="Interface Language"
-                value={interfaceLanguage}
-                onChange={(e) => setInterfaceLanguage(e.target.value as LanguageCode)}
-                className="px-2.5 py-1.5 rounded-lg border border-slate-200 bg-slate-50 font-semibold text-slate-900 cursor-pointer"
+            {/* Zone 3: Compact Visual "Smart Learning" Badge (Non-clickable label) */}
+            <div className="flex items-center shrink-0">
+              <span
+                aria-label="Smart Learning"
+                title="Smart Learning"
+                className="inline-flex items-center justify-center gap-1 sm:gap-1.5 px-2 min-[360px]:px-2.5 sm:px-3.5 py-1 sm:py-1.5 rounded-full bg-[#EFF6FF] text-[#2563EB] border border-[#BFDBFE] text-[10.5px] min-[390px]:text-[11px] sm:text-xs font-semibold tracking-tight whitespace-nowrap select-none shadow-2xs md:hover:bg-[#DBEAFE] md:hover:border-[#93C5FD] transition-colors duration-200"
               >
-                {(['en', 'bn', 'hi'] as LanguageCode[]).map((l) => (
-                  <option key={l} value={l}>
-                    {LANGUAGE_LABELS[l]}
-                  </option>
-                ))}
-              </select>
+                <Sparkles className="w-3.5 h-3.5 text-[#2563EB] shrink-0" />
+                <span className="hidden min-[360px]:inline text-[#2563EB]">Smart Learning</span>
+              </span>
             </div>
-          </div>
-
-          {/* Zone 3: Single Primary Action Button */}
-          <div className="flex items-center gap-2 shrink-0">
-            <button
-              type="button"
-              onClick={() => requestQuizWithLanguageModal()}
-              className="px-3.5 py-2 rounded-lg bg-slate-900 hover:bg-slate-800 text-white text-xs font-semibold transition-colors whitespace-nowrap shrink-0 cursor-pointer"
-            >
-              {t(interfaceLanguage, 'navTakeQuiz')}
-            </button>
-          </div>
-        </header>
+          </header>
 
         {/* Mobile Quick Bar for Independent Language & Class Switching */}
         <div className="md:hidden bg-white border-b border-slate-200 px-4 py-2.5 flex flex-wrap items-center justify-between gap-2 text-xs">
@@ -1962,11 +2018,17 @@ export default function App() {
                   {SUBJECT_LIST.map((sub) => {
                     const curr = sub.curriculumByClass[selectedClass];
                     const stats = subjectWiseStats.find((s) => s.subjectId === sub.id);
+                    const isSelectedOnDashboard = selectedSubject === sub.id;
 
                     return (
                       <div
                         key={sub.id}
-                        className="bg-white border border-slate-200 rounded-xl p-5 flex flex-col justify-between space-y-4 hover:border-slate-300 transition-colors edu-card-hover"
+                        onClick={() => setSelectedSubject(sub.id)}
+                        className={`bg-white border rounded-xl p-5 flex flex-col justify-between space-y-4 transition-all cursor-pointer edu-card-hover ${
+                          isSelectedOnDashboard
+                            ? 'border-indigo-600 ring-1 ring-indigo-600/20'
+                            : 'border-slate-200 hover:border-slate-300'
+                        }`}
                       >
                         <div className="space-y-2.5">
                           <div className="flex items-center justify-between text-xs text-slate-500">
@@ -1983,9 +2045,14 @@ export default function App() {
                             </span>
                           </div>
 
-                          <h3 className="text-lg font-bold text-slate-900">
-                            {sub.name[interfaceLanguage]}
-                          </h3>
+                          <div className="flex items-center justify-between gap-2">
+                            <h3 className="text-lg font-bold text-slate-900">
+                              {sub.name[interfaceLanguage]}
+                            </h3>
+                            {isSelectedOnDashboard && (
+                              <CheckCircle2 className="w-4 h-4 text-indigo-600 shrink-0" />
+                            )}
+                          </div>
 
                           <p className="text-xs text-slate-600 leading-relaxed">
                             {sub.shortDesc[interfaceLanguage]}
@@ -2015,7 +2082,8 @@ export default function App() {
                           <div className="grid grid-cols-2 gap-2">
                             <button
                               type="button"
-                              onClick={() => {
+                              onClick={(e) => {
+                                e.stopPropagation();
                                 setSelectedSubject(sub.id);
                                 setSelectedTopic('All Verified Chapters');
                                 if (activeAttempt?.status === 'in_progress') {
@@ -2031,15 +2099,9 @@ export default function App() {
                             <button
                               type="button"
                               disabled={generatingQuiz}
-                              onClick={() => {
-                                setSelectedSubject(sub.id);
-                                requestQuizWithLanguageModal({
-                                  classLevel: selectedClass,
-                                  subject: sub.id,
-                                  topic: 'All Verified Chapters',
-                                  questionCount: 5,
-                                  mode: 'practice',
-                                });
+                              onClick={(e) => {
+                                e.stopPropagation();
+                                handleQuickPracticeSubjectCard(sub.id);
                               }}
                               className="py-2 px-3 rounded-lg bg-slate-900 hover:bg-slate-800 text-xs font-semibold text-white cursor-pointer whitespace-nowrap disabled:opacity-50"
                             >
