@@ -1,4 +1,4 @@
-import React, { useState, useRef } from 'react';
+import React, { useState, useRef, useMemo, useEffect } from 'react';
 import { AnimatePresence, motion } from 'motion/react';
 import {
   FileText,
@@ -20,7 +20,7 @@ import {
   SubjectId,
 } from '../types';
 import { t, LANGUAGE_LABELS } from '../i18n/translations';
-import { CLASS_LEVELS, SUBJECT_LIST, getSubjectDefinition } from '../data/curriculum';
+import { CLASS_LEVELS, getSubjectsForClass, getSubjectDefinition } from '../data/curriculum';
 import { safeFetchJson, validateStudyNotesPayload } from '../utils/apiClient';
 
 interface StudyNotesViewProps {
@@ -78,7 +78,8 @@ export const StudyNotesView: React.FC<StudyNotesViewProps> = ({
   onLaunchQuizFromNoteMcqs,
 }) => {
   const [classLevel, setClassLevel] = useState<ClassLevel>(defaultClass);
-  const [subject, setSubject] = useState<SubjectId>('life_science');
+  const initialAvailableSubjects = useMemo(() => getSubjectsForClass(defaultClass), [defaultClass]);
+  const [subject, setSubject] = useState<SubjectId>(() => initialAvailableSubjects[0]?.id || 'mathematics');
   // Independent Input and Output languages (Section 13)
   const [inputLanguage, setInputLanguage] = useState<LanguageCode>('en');
   const [outputLanguage, setOutputLanguage] = useState<LanguageCode>(defaultQuizLanguage);
@@ -89,6 +90,15 @@ export const StudyNotesView: React.FC<StudyNotesViewProps> = ({
     mimeType: string;
     base64?: string;
   } | null>(null);
+
+  const availableSubjectsForNotes = useMemo(() => getSubjectsForClass(classLevel), [classLevel]);
+
+  // Keep subject valid for the active classLevel
+  useEffect(() => {
+    if (!availableSubjectsForNotes.some((s) => s.id === subject)) {
+      setSubject(availableSubjectsForNotes[0]?.id || 'mathematics');
+    }
+  }, [availableSubjectsForNotes, subject]);
 
   const [processing, setProcessing] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -273,7 +283,7 @@ export const StudyNotesView: React.FC<StudyNotesViewProps> = ({
                 onChange={(e) => setSubject(e.target.value as SubjectId)}
                 className="w-full px-3 py-2 rounded-lg border border-slate-300 bg-white text-sm text-slate-900 cursor-pointer"
               >
-                {SUBJECT_LIST.map((s) => (
+                {availableSubjectsForNotes.map((s) => (
                   <option key={s.id} value={s.id}>
                     {s.name[interfaceLanguage]}
                   </option>

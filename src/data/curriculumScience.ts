@@ -1,0 +1,600 @@
+import { SubjectDefinition, ch } from './curriculumTypes';
+
+const TB_EVS_5 = {
+  en: 'Amader Paribesh (Class V — WBBPE)',
+  bn: 'আমাদের পরিবেশ (পঞ্চম শ্রেণি — WBBPE)',
+  hi: 'आमादेर परिवेश (कक्षा 5 — WBBPE)',
+};
+const TB_SCI_6 = {
+  en: 'Paribesh o Bigyan (Class VI — WBBSE)',
+  bn: 'পরিবেশ ও বিজ্ঞান (ষষ্ঠ শ্রেণি — WBBSE)',
+  hi: 'परिवेश ओ विज्ञान (कक्षा 6 — WBBSE)',
+};
+const TB_SCI_7 = {
+  en: 'Paribesh o Bigyan (Class VII — WBBSE)',
+  bn: 'পরিবেশ ও বিজ্ঞান (সপ্তম শ্রেণি — WBBSE)',
+  hi: 'परिवेश ओ विज्ञान (कक्षा 7 — WBBSE)',
+};
+const TB_SCI_8 = {
+  en: 'Paribesh o Bigyan (Class VIII — WBBSE)',
+  bn: 'পরিবেশ ও বিজ্ঞান (অষ্টম শ্রেণি — WBBSE)',
+  hi: 'परिवेश ओ विज्ञान (कक्षा 8 — WBBSE)',
+};
+const TB_PS_9 = {
+  en: 'Bhouto Bigyan o Paribesh (Class IX — WBBSE)',
+  bn: 'ভৌতবিজ্ঞান ও পরিবেশ (নবম শ্রেণি — WBBSE)',
+  hi: 'भौतविज्ञान ओ परिवेश (कक्षा 9 — WBBSE)',
+};
+const TB_PS_10 = {
+  en: 'Bhouto Bigyan o Paribesh (Class X — WBBSE Madhyamik)',
+  bn: 'ভৌতবিজ্ঞান ও পরিবেশ (দশম শ্রেণি — WBBSE মাধ্যমিক)',
+  hi: 'भौतविज्ञान ओ परिवेश (कक्षा 10 — WBBSE माध्यमिक)',
+};
+const TB_LS_9 = {
+  en: 'Jiban Bigyan o Paribesh (Class IX — WBBSE)',
+  bn: 'জীবন বিজ্ঞান ও পরিবেশ (নবম শ্রেণি — WBBSE)',
+  hi: 'जीवन विज्ञान ओ परिवेश (कक्षा 9 — WBBSE)',
+};
+const TB_LS_10 = {
+  en: 'Jiban Bigyan o Paribesh (Class X — WBBSE Madhyamik)',
+  bn: 'জীবন বিজ্ঞান ও পরিবেশ (দশম শ্রেণি — WBBSE মাধ্যমিক)',
+  hi: 'जीवन विज्ञान ओ परिवेश (कक्षा 10 — WBBSE माध्यमिक)',
+};
+
+const CLASS_6_SCIENCE_CHAPTERS = [
+  ch('s6_c1', 1, 'Ch 1: Environment and Living Organisms (Interdependence)', 'অধ্যায় ১: পরিবেশ ও জীবজগতের পারস্পরিক নির্ভরতা', 'अध्याय 1: पर्यावरण और जीव जगत की पारस्परिक निर्भरता', ['Dependence of plants and animals', 'Pollination, seed dispersal, symbiosis, parasitism, food chains'], TB_SCI_6),
+  ch('s6_c2', 2, 'Ch 2: Events Around Us (Physical & Chemical Changes)', 'অধ্যায় ২: আমাদের চারপাশের ঘটনাসমূহ', 'अध्याय 2: हमारे चारों ओर की घटनाएँ (भौतिक और रासायनिक परिवर्तन)', ['Unidirectional & bidirectional events', 'Periodic & non-periodic events', 'Reversible/physical and irreversible/chemical changes'], TB_SCI_6),
+  ch('s6_c3', 3, 'Ch 3: Element, Compound and Mixture', 'অধ্যায় ৩: মৌলিক, যৌগিক ও মিশ্র পদার্থ', 'अध्याय 3: तत्व, यौगिक और मिश्रण', ['Metals and non-metals', 'Symbols, atomicity, valency, chemical formulae', 'Separation of mixtures (filtration, distillation, crystallization)'], TB_SCI_6),
+  ch('s6_c4', 4, 'Ch 4: Rocks and Minerals', 'অধ্যায় ৪: শিলা ও খনিজ পদার্থ', 'अध्याय 4: चट्टानें और खनिज पदार्थ', ['Igneous, sedimentary, and metamorphic rocks', 'Ores, alloys, fossil fuels (coal, petroleum)'], TB_SCI_6),
+  ch('s6_c5', 5, 'Ch 5: Measurement or Mensuration of Physical Quantities', 'অধ্যায় ৫: মাপজোক বা পরিমাপ', 'अध्याय 5: भौतिक राशियों का मापन', ['Fundamental and derived units', 'SI units of length, mass, time, area, volume', 'Measuring cylinder and stopwatch'], TB_SCI_6),
+  ch('s6_c6', 6, 'Ch 6: Force and Energy (Preliminary Concept)', 'অধ্যায় ৬: বল ও শক্তির প্রাথমিক ধারণা', 'अध्याय 6: बल और ऊर्जा की प्रारंभिक अवधारणा', ['Contact and non-contact forces', 'Friction', 'Kinetic and potential energy', 'Energy transformations'], TB_SCI_6),
+  ch('s6_c7', 7, 'Ch 7: Liquid and Gaseous States — Pressure & Thrust', 'অধ্যায় ৭: তরল ও গ্যাসীয় পদার্থের স্থিতি ও গতি', 'अध्याय 7: द्रव और गैसीय पदार्थों की स्थिति एवं गति', ["Bernoulli's principle in daily life", 'Atmospheric pressure', 'Liquid pressure and buoyancy'], TB_SCI_6),
+  ch('s6_c8', 8, 'Ch 8: Human Body (Heart, Blood, Lungs, Bones & Joints)', 'অধ্যায় ৮: মানুষের শরীর', 'अध्याय 8: मानव शरीर (हृदय, रक्त, फेफड़े, अस्थियाँ और जोड़)', ['Chambers of human heart', 'Arteries, veins, capillaries, blood components', 'Lungs and breathing', 'Skeletal joints (ball-and-socket, hinge, pivot)'], TB_SCI_6),
+  ch('s6_c9', 9, 'Ch 9: Common Machines (Simple Machines)', 'অধ্যায় ৯: সাধারণ যন্ত্রপাতি', 'अध्याय 9: साधारण मशीनें (सरल यंत्र)', ['Class I, II, III levers', 'Inclined plane, wedge, screw, pulley, wheel and axle', 'Mechanical advantage'], TB_SCI_6),
+  ch('s6_c10', 10, 'Ch 10: Biodiversity and Its Classification', 'অধ্যায় ১০: জীববৈচিত্র্য ও তার শ্রেণীবিভাগ', 'अध्याय 10: जैव विविधता और उसका वर्गीकरण', ['Five Kingdom classification (Monera, Protista, Fungi, Plantae, Animalia)', 'Algae, bryophytes, pteridophytes, gymnosperms, angiosperms', 'Invertebrates and vertebrates'], TB_SCI_6),
+  ch('s6_c11', 11, 'Ch 11: Habitat and Adaptation of Organisms (Behavioural)', 'অধ্যায় ১১: কয়েকটি বিশেষ প্রাণীর বাসস্থান ও আচরণ', 'अध्याय 11: कुछ विशेष प्राणियों के आवास और व्यवहार', ['Social insects: honeybees, ants, termites', 'Chimpanzee, migratory birds, behavioral adaptations'], TB_SCI_6),
+  ch('s6_c12', 12, 'Ch 12: Waste Management and Recycling', 'অধ্যায় ১২: বর্জ্য পদার্থ', 'अध्याय 12: अपशिष्ट पदार्थ और प्रबंधन', ['Biodegradable and non-biodegradable waste', '4R principle: Reduce, Refuse, Reuse, Recycle', 'Composting'], TB_SCI_6),
+];
+
+const CLASS_7_SCIENCE_CHAPTERS = [
+  ch('s7_c1', 1, 'Ch 1: Physical Environment — Heat, Light, Electricity & Magnetism', 'অধ্যায় ১: ভৌত পরিবেশ (তাপ, আলো, চুম্বক ও তড়িৎ)', 'अध्याय 1: भौतिक पर्यावरण (ऊष्मा, प्रकाश, चुंबक और विद्युत)', ['Thermometry, specific heat, latent heat of fusion (80 cal/g) and vaporization (540 cal/g)', 'Rectilinear propagation of light, reflection, refraction, dispersion', 'Magnetic induction & electromagnet', 'Electric cell, LED, circuit symbols'], TB_SCI_7),
+  ch('s7_c2', 2, 'Ch 2: Time and Motion', 'অধ্যায় ২: সময় ও গতি', 'अध्याय 2: समय और गति', ['Rest and motion', 'Rectilinear, circular, rotational, periodic motion', 'Speed, velocity, acceleration', "Newton's First, Second, and Third Laws of Motion"], TB_SCI_7),
+  ch('s7_c3', 3, 'Ch 3: Atoms, Molecules and Chemical Reactions', 'অধ্যায় ৩: পরমাণু, অণু ও রাসায়নিক বিক্রিয়া', 'अध्याय 3: परमाणु, अणु और रासायनिक अभिक्रियाएँ', ['Protons, neutrons, electrons', 'Valency, radicals, chemical formulae', 'Balancing chemical equations', 'Direct combination, decomposition, displacement, double decomposition'], TB_SCI_7),
+  ch('s7_c4', 4, 'Ch 4: Role of Substances in Environment (Acids, Bases, Salts & Minerals)', 'অধ্যায় ৪: পরিবেশের সজীব উপাদানের গঠন ও বিভিন্ন পদার্থের ভূমিকা', 'अध्याय 4: पर्यावरण में पदार्थों की भूमिका (अम्ल, क्षार, लवण और खनिज)', ['Indicators (litmus, phenolphthalein, methyl orange)', 'pH and neutralization', 'Common salt, water, and trace elements in human body', 'Polymers and cements'], TB_SCI_7),
+  ch('s7_c5', 5, 'Ch 5: Human Food (Nutrients, Vitamins, Minerals & Balanced Diet)', 'অধ্যায় ৫: মানুষের খাদ্য', 'अध्याय 5: मानव भोजन (पोषक तत्व, विटामिन, खनिज और संतुलित आहार)', ['Carbohydrates, proteins, lipids', 'Water-soluble (B, C) and fat-soluble (A, D, E, K) vitamins', 'Deficiency diseases (Kwashiorkor, Marasmus, Scurvy, Rickets, Goitre, Anaemia)'], TB_SCI_7),
+  ch('s7_c6', 6, 'Ch 6: Morphological Diversity and Functions of Plant Parts', 'অধ্যায় ৬: পরিবেশের সজীব উপাদানের গঠনগত বৈচিত্র্য ও কার্যগত প্রক্রিয়া', 'अध्याय 6: पादप अंगों की संरचनात्मक विविधता और कार्य', ['Root zones & modifications', 'Stem & leaf modifications', 'Complete vs incomplete flowers, pollination, fertilization', 'Seeds, fruits, osmosis & diffusion'], TB_SCI_7),
+  ch('s7_c7', 7, 'Ch 7: Environmental Crisis, Plant & Environment Conservation', 'অধ্যায় ৭: পরিবেশের সংকট, উদ্ভিদ ও পরিবেশের সংরক্ষণ', 'अध्याय 7: पर्यावरणीय संकट, पादप और पर्यावरण संरक्षण', ['Climate change, global warming', 'Loss of biodiversity, mangrove conservation in Sundarbans'], TB_SCI_7),
+  ch('s7_c8', 8, 'Ch 8: Environment and Public Health', 'অধ্যায় ৮: পরিবেশ ও জনস্বাস্থ্য', 'अध्याय 8: पर्यावरण और जनस्वास्थ्य', ['Communicable and water-borne/vector-borne diseases (Malaria, Dengue, Cholera, Plague)', 'Occupational hazards, heavy metal pollution (Arsenic, Fluoride)'], TB_SCI_7),
+  ch('s7_c9', 9, 'Ch 9: Food Production and Improvement', 'অধ্যায় ৯: খাদ্য উৎপাদন ও আধুনিকীকরণ', 'अध्याय 9: खाद्य उत्पादन और आधुनिकीकरण', ['Rabi and Kharif crops', 'Manures vs chemical fertilizers', 'Apiculture, pisciculture, poultry, sericulture'], TB_SCI_7),
+];
+
+const CLASS_8_SCIENCE_CHAPTERS = [
+  ch('s8_c1', 1, 'Ch 1: Physical Environment — Force, Pressure, Friction, Density & Heat/Light/Static Electricity', 'অধ্যায় ১: ভৌত পরিবেশ (বল ও চাপ, ঘর্ষণ, ঘনত্ব ও প্লবতা, তাপ, আলো ও স্থির তড়িৎ)', 'अध्याय 1: भौतिक पर्यावरण (बल, दाब, घर्षण, घनत्व, उत्प्लावकता, ऊष्मा, प्रकाश और स्थिर विद्युत)', ["Newton's law of gravitation F = G m1 m2 / r^2", "Archimedes' principle & buoyancy", 'Static electricity & Coulomb interaction', 'Conduction, convection, radiation, thermos flask', 'Laws of reflection, multiple reflections (kaleidoscope, periscope), total internal reflection & mirage'], TB_SCI_8),
+  ch('s8_c2', 2, 'Ch 2: Nature of Matter (Physical & Chemical Properties, Atomic Structure & Bonding)', 'অধ্যায় ২: মৌল, যৌগ ও রাসায়নিক বিক্রিয়া (পদার্থের প্রকৃতি ও পরমাণুর গঠন)', 'अध्याय 2: पदार्थ की प्रकृति, परमाणु संरचना और रासायनिक आबंधन', ['Rutherford and Bohr atomic models', 'Atomic number, mass number, isotopes, isobars, isotones', 'Ionic and covalent bonding', 'Oxidation-reduction, exothermic/endothermic reactions, catalysts, electrolysis'], TB_SCI_8),
+  ch('s8_c3', 3, 'Ch 3: Several Common Gases (Oxygen, Hydrogen, Carbon Dioxide)', 'অধ্যায় ৩: কয়েকটি গ্যাসের পরিচিতি (অক্সিজেন, হাইড্রোজেন, কার্বন ডাইঅক্সাইড)', 'अध्याय 3: कुछ सामान्य गैसों का परिचय (ऑक्सीजन, हाइड्रोजन, कार्बन डाइऑक्साइड)', ['Laboratory preparation, physical & chemical properties, and uses of O2, H2, CO2'], TB_SCI_8),
+  ch('s8_c4', 4, 'Ch 4: Occurrence of Carbon and Its Compounds in Nature', 'অধ্যায় ৪: প্রকৃতিতে কার্বন ও কার্বনঘটিত যৌগের অবস্থান', 'अध्याय 4: प्रकृति में कार्बन और उसके यौगिकों की उपस्थिति', ['Allotropes of carbon: diamond, graphite, fullerene (crystalline) and coal, charcoal, lampblack (amorphous)', 'Greenhouse effect, fuel calorific value, polymers'], TB_SCI_8),
+  ch('s8_c5', 5, 'Ch 5: Natural Phenomena and Their Analysis (Lightning & Epidemic)', 'অধ্যায় ৫: প্রাকৃতিক ঘটনা ও তার বিশ্লেষণ', 'अध्याय 5: प्राकृतिक घटनाएँ और उनका विश्लेषण (तड़ित और महामारी)', ['Atmospheric electricity, lightning conductor', 'Safety during thunderstorms', 'Epidemics and pandemics'], TB_SCI_8),
+  ch('s8_c6', 6, 'Ch 6: Structure of Living Organisms (Cell & Cell Organelles)', 'অধ্যায় ৬: দেহের গঠন (কোষ, কলা ও অঙ্গাণু)', 'अध्याय 6: जीवों की संरचना (कोशिका, ऊतक और कोशिकांग)', ['Light & electron microscopes', 'Prokaryotic vs eukaryotic cells', 'Nucleus, mitochondria, plastids, ER, Golgi, ribosomes, lysosomes, centrosome', 'Plant and animal tissues'], TB_SCI_8),
+  ch('s8_c7', 7, 'Ch 7: World of Microbes', 'অধ্যায় ৭: অণুজীবের জগৎ', 'अध्याय 7: सूक्ष्मजीवों का संसार', ['Bacteria, viruses, protozoa, fungi, algae', 'Nitrogen fixation (Rhizobium), fermentation, antibiotics, pasteurization'], TB_SCI_8),
+  ch('s8_c8', 8, 'Ch 8: Human Endocrine System and Adolescence', 'অধ্যায় ৮: মানুষের অন্তঃক্ষরা গ্রন্থি ও বয়ঃসন্ধি', 'अध्याय 8: मानव अंतःस्रावी तंत्र और किशोरावस्था', ['Pituitary, thyroid, adrenal, pancreas (insulin & glucagon), testes, ovaries', 'Hormonal regulation and adolescent health'], TB_SCI_8),
+  ch('s8_c9', 9, 'Ch 9: Food Production and Management (Agriculture & Animal Husbandry)', 'অধ্যায় ৯: অন্তর্দেশীয় মৎস্যচাষ ও কৃষি উৎপাদন ব্যবস্থাপনা', 'अध्याय 9: खाद्य उत्पादन और कृषि प्रबंधन', ['Soil preparation, sowing, irrigation, weeding, harvesting, storage', 'High yielding varieties (HYV), organic farming, composite fish culture'], TB_SCI_8),
+  ch('s8_c10', 10, 'Ch 10: Biodiversity, Environmental Crisis and Conservation of Endangered Animals', 'অধ্যায় ১০: জীববৈচিত্র্য, পরিবেশের সংকট ও বিপন্ন প্রাণী সংরক্ষণ', 'अध्याय 10: जैव विविधता, पर्यावरणीय संकट और संकटग्रस्त प्राणियों का संरक्षण', ['Forest ecosystems, desert & polar adaptations', 'IUCN Red Data Book, Royal Bengal Tiger, One-horned Rhino, Red Panda, Gangetic Dolphin'], TB_SCI_8),
+  ch('s8_c11', 11, 'Ch 11: Our Surrounding Environment and Plant World (Spices & Medicinal Plants)', 'অধ্যায় ১১: আমাদের চারপাশের পরিবেশ ও উদ্ভিদজগৎ', 'अध्याय 11: हमारे चारों ओर का पर्यावरण और पादप जगत (औषधीय पौधे एवं मसाले)', ['Medicinal compounds in Neem, Tulsi, Cinchona (quinine), Turmeric, Garlic, Aloe vera', 'Spices: black pepper, cinnamon, clove, cardamom, saffron'], TB_SCI_8),
+];
+
+export const EVS_SUBJECT: SubjectDefinition = {
+  id: 'evs',
+  name: {
+    en: 'Environmental Studies (Amader Paribesh)',
+    bn: 'আমাদের পরিবেশ (Environmental Studies)',
+    hi: 'आमादेर परिवेश (Environmental Studies)',
+  },
+  shortDesc: {
+    en: 'Official WBBPE Class V Amader Paribesh textbook covering human body, soil, water, biodiversity, West Bengal geography, heritage & sky.',
+    bn: 'পশ্চিমবঙ্গ প্রাথমিক শিক্ষা পর্ষদের পঞ্চম শ্রেণির আমাদের পরিবেশ পাঠ্যপুস্তকের মানবদেহ, ভৌত পরিবেশ, পশ্চিমবঙ্গের প্রকৃতি, ঐতিহ্য ও আকাশ।',
+    hi: 'WBBPE कक्षा 5 आमादेर परिवेश पाठ्यपुस्तक — मानव शरीर, मृदा, जल, जैव विविधता, पश्चिम बंगाल का भूगोल, विरासत और आकाश।',
+  },
+  domainGuardKeywords: [
+    'body', 'skin', 'bone', 'soil', 'water', 'forest', 'west bengal', 'river', 'agriculture', 'transport', 'solar', 'eclipse',
+  ],
+  curriculumByClass: {
+    5: {
+      status: 'prescribed',
+      verificationStatus: 'verified',
+      applicableToClass: true,
+      textbookName: TB_EVS_5,
+      syllabusVersion: 'WBBPE Primary Syllabus (Current Edition)',
+      officialSource: 'West Bengal Board of Primary Education — Amader Paribesh Class V',
+      boardNote: {
+        en: 'Official WBBPE Class V Amader Paribesh — All 10 Verified Chapters.',
+        bn: 'পশ্চিমবঙ্গ প্রাথমিক শিক্ষা পর্ষদ (WBBPE) পঞ্চম শ্রেণি আমাদের পরিবেশ — সম্পূর্ণ ১০টি অধ্যায়।',
+        hi: 'WBBPE कक्षा 5 आमादेर परिवेश — सभी 10 सत्यापित अध्याय।',
+      },
+      chapters: [
+        ch('evs5_c1', 1, 'Ch 1: Human Body (Skin, Melanin, Hair, Bones, Joints, Muscles, Heart & Blood)', 'অধ্যায় ১: মানবদেহ (ত্বক, মেলানিন, অস্থি, সন্ধি, পেশি, হৃৎপিণ্ড ও রক্ত)', 'अध्याय 1: मानव शरीर (त्वचा, मेलानिन, अस्थियाँ, जोड़, मांसपेशियाँ, हृदय और रक्त)', ['Layers of skin & melanin pigment', 'Major bones (femur to stapes) and joints', 'Stethoscope invention (Laennec)', 'ORS preparation and immunity'], TB_EVS_5),
+        ch('evs5_c2', 2, 'Ch 2: Physical Environment — Soil, Water & Biodiversity', 'অধ্যায় ২: ভৌত পরিবেশ — মাটি, জল ও জীববৈচিত্র্য', 'अध्याय 2: भौतिक पर्यावरण — मिट्टी, जल और जैव विविधता', ['Sandy, clayey, and loamy soil', 'Soil erosion and earthworm as farmer friend', 'Surface water, groundwater, pond ecosystem, East Kolkata Wetlands'], TB_EVS_5),
+        ch('evs5_c3', 3, 'Ch 3: General Introduction to West Bengal (Physiography & Rivers)', 'অধ্যায় ৩: পশ্চিমবঙ্গের সাধারণ পরিচিতি (ভূপ্রকৃতি ও নদনদী)', 'अध्याय 3: पश्चिम बंगाल का सामान्य परिचय (भू-आकृति और नदियाँ)', ['Darjeeling Himalayas (Sandakphu)', 'Western Rarh plateau (Mama-Bhagne hill)', 'Ganges delta, Sundarbans, Teesta, Torsha, Damodar, Rupnarayan, Hooghly'], TB_EVS_5),
+        ch('evs5_c4', 4, 'Ch 4: Environment and Wealth (Forests, Wildlife & Human Livelihood)', 'অধ্যায় ৪: পরিবেশ ও সম্পদ (বনভূমি, বন্যপ্রাণী ও জীবিকা)', 'अध्याय 4: पर्यावरण और संपदा (वन, वन्यजीव और आजीविका)', ['Sal, teak, sundari trees', 'One-horned rhino (Jaldapara/Gorumara), Royal Bengal Tiger', 'Joint Forest Management (Arabari)'], TB_EVS_5),
+        ch('evs5_c5', 5, 'Ch 5: Agriculture and Fisheries of West Bengal', 'অধ্যায় ৫: পশ্চিমবঙ্গের কৃষি ও মৎস্যচাষ', 'अध्याय 5: पश्चिम बंगाल की कृषि और मत्स्य पालन', ['Aus, Aman, Boro paddy', 'Jute, tea (Darjeeling/Dooars), mango (Malda), potato', 'Major Carp (Rohu, Catla, Mrigal) and Hilsa conservation'], TB_EVS_5),
+        ch('evs5_c6', 6, 'Ch 6: Mineral Resources & Energy Sources (Coal, Thermal & Solar Power)', 'অধ্যায় ৬: পরিবেশ ও খনিজ সম্পদ এবং শক্তি', 'अध्याय 6: खनिज संसाधन और ऊर्जा के स्रोत (कोयला, ताप विद्युत और सौर ऊर्जा)', ['Raniganj coalfield', 'Thermal power plants (Kolaghat, Bakreswar, Farakka)', 'Conventional vs non-conventional energy (solar, wind, bio-gas)'], TB_EVS_5),
+        ch('evs5_c7', 7, 'Ch 7: Transport, Vehicles and Road Safety Rules', 'অধ্যায় ৭: পরিবহন ও যানবাহন এবং পথ নিরাপত্তার নিয়ম', 'अध्याय 7: परिवहन, वाहन और सड़क सुरक्षा नियम', ['Evolution of wheel and boats', 'First train in Bengal (Howrah to Hooghly, 1854)', 'Tramway and Metro in Kolkata', 'Traffic signals and zebra crossing'], TB_EVS_5),
+        ch('evs5_c8', 8, 'Ch 8: Environment and Production — Cottage & Heavy Industries, Folk Culture', 'অধ্যায় ৮: পরিবেশ ও উৎপাদন — কুটির শিল্প, বৃহৎ শিল্প ও লোকসংস্কৃতি', 'अध्याय 8: पर्यावरण और उत्पादन — कुटीर एवं भारी उद्योग और लोक संस्कृति', ['Tant/Baluchari sarees, Krishnanagar clay dolls, Bankura terracotta, Purulia Chhau mask', 'Durgapur, Asansol, Haldia industrial belts'], TB_EVS_5),
+        ch('evs5_c9', 9, 'Ch 9: Human Rights, Social Reformers & Freedom Struggle Heritage', 'অধ্যায় ৯: মানবাধিকার, সমাজ সংস্কারক ও স্বাধীনতা সংগ্রামের ঐতিহ্য', 'अध्याय 9: मानवाधिकार, समाज सुधारक और स्वतंत्रता संग्राम की विरासत', ['Raja Rammohan Roy, Ishwar Chandra Vidyasagar, Rabindranath Tagore, Begum Rokeya', 'Netaji Subhas Chandra Bose, Khudiram Bose, Matangini Hazra, Sidhu-Kanhu, Birsa Munda'], TB_EVS_5),
+        ch('evs5_c10', 10, 'Ch 10: Sky, Solar System, Eclipses & Disaster Management', 'অধ্যায় ১০: আকাশ, সৌরজগৎ, গ্রহণ ও প্রাকৃতিক বিপর্যয় মোকাবিলা', 'अध्याय 10: आकाश, सौरमंडल, ग्रहण और आपदा प्रबंधन', ['Phases of the Moon (Full Moon & New Moon)', 'Solar and Lunar eclipses', 'Tides, cyclones (Aila/Amphan), earthquakes, and first aid'], TB_EVS_5),
+      ],
+    },
+    6: {
+      status: 'integrated_evs',
+      verificationStatus: 'verified',
+      applicableToClass: false,
+      textbookName: TB_SCI_6,
+      syllabusVersion: 'WBBSE Upper Primary (Transitions to Paribesh o Bigyan)',
+      officialSource: 'WBBSE Class VI Paribesh o Bigyan',
+      boardNote: {
+        en: 'In Class 6, Environmental Studies transitions into Paribesh o Bigyan, History, and Geography.',
+        bn: 'ষষ্ঠ শ্রেণিতে আমাদের পরিবেশ বিভক্ত হয়ে পরিবেশ ও বিজ্ঞান, ইতিহাস এবং ভূগোল হিসেবে পাঠ্য।',
+        hi: 'कक्षा 6 में पर्यावरण अध्ययन परिवेश ओ विज्ञान, इतिहास और भूगोल में विभाजित हो जाता है।',
+      },
+      chapters: CLASS_6_SCIENCE_CHAPTERS,
+    },
+    7: {
+      status: 'integrated_evs',
+      verificationStatus: 'verified',
+      applicableToClass: false,
+      textbookName: TB_SCI_7,
+      syllabusVersion: 'WBBSE Upper Primary',
+      officialSource: 'WBBSE Class VII Paribesh o Bigyan',
+      boardNote: {
+        en: 'In Class 7, Environmental Science is taught under Paribesh o Bigyan.',
+        bn: 'সপ্তম শ্রেণিতে পরিবেশ ও বিজ্ঞান পাঠ্যপুস্তকের অন্তর্ভুক্ত।',
+        hi: 'कक्षा 7 में यह परिवेश ओ विज्ञान के अंतर्गत पढ़ाया जाता है।',
+      },
+      chapters: CLASS_7_SCIENCE_CHAPTERS,
+    },
+    8: {
+      status: 'integrated_evs',
+      verificationStatus: 'verified',
+      applicableToClass: false,
+      textbookName: TB_SCI_8,
+      syllabusVersion: 'WBBSE Upper Primary',
+      officialSource: 'WBBSE Class VIII Paribesh o Bigyan',
+      boardNote: {
+        en: 'In Class 8, Environmental Science is taught under Paribesh o Bigyan.',
+        bn: 'অষ্টম শ্রেণিতে পরিবেশ ও বিজ্ঞান পাঠ্যপুস্তকের অন্তর্ভুক্ত।',
+        hi: 'कक्षा 8 में यह परिवेश ओ विज्ञान के अंतर्गत पढ़ाया जाता है।',
+      },
+      chapters: CLASS_8_SCIENCE_CHAPTERS,
+    },
+    9: {
+      status: 'integrated_evs',
+      verificationStatus: 'verified',
+      applicableToClass: false,
+      textbookName: TB_LS_9,
+      syllabusVersion: 'WBBSE Secondary',
+      officialSource: 'WBBSE Class IX Jiban Bigyan o Paribesh',
+      boardNote: {
+        en: 'In Class 9, Ecology & Environment are integrated in Jiban Bigyan o Paribesh and Bhouto Bigyan o Paribesh.',
+        bn: 'নবম শ্রেণিতে জীবন বিজ্ঞান ও পরিবেশ এবং ভৌতবিজ্ঞান ও পরিবেশের অন্তর্ভুক্ত।',
+        hi: 'कक्षा 9 में यह जीवन विज्ञान ओ परिवेश तथा भौतविज्ञान ओ परिवेश में समाहित है।',
+      },
+      chapters: [
+        ch('evs9_c1', 1, 'Ch 5: Environment and Its Resources (Ecology & Conservation)', 'অধ্যায় ৫: পরিবেশ ও তার সম্পদ', 'अध्याय 5: पर्यावरण और उसके संसाधन', ['Ecological organization, food web, energy flow (10% law), biogeochemical cycles, biodiversity conservation'], TB_LS_9),
+      ],
+    },
+    10: {
+      status: 'integrated_evs',
+      verificationStatus: 'verified',
+      applicableToClass: false,
+      textbookName: TB_LS_10,
+      syllabusVersion: 'WBBSE Madhyamik',
+      officialSource: 'WBBSE Class X Jiban Bigyan o Paribesh & Bhouto Bigyan o Paribesh',
+      boardNote: {
+        en: 'In Class 10, Environment is integrated into Ch 5 of Life Science and Ch 1 of Physical Science.',
+        bn: 'দশম শ্রেণিতে জীবন বিজ্ঞান (অধ্যায় ৫) ও ভৌতবিজ্ঞান (অধ্যায় ১)-এর অন্তর্ভুক্ত।',
+        hi: 'कक्षा 10 में यह जीवन विज्ञान (अध्याय 5) और भौतविज्ञान (अध्याय 1) में समाहित है।',
+      },
+      chapters: [
+        ch('evs10_c1', 1, 'Ch 5: Environment, Its Resources and Their Conservation', 'অধ্যায় ৫: পরিবেশ, তার সম্পদ এবং তাদের সংরক্ষণ', 'अध्याय 5: पर्यावरण, उसके संसाधन और उनका संरक्षण', ['Nitrogen cycle, air/water/soil/noise pollution, eutrophication, biodiversity hotspots, in-situ & ex-situ conservation'], TB_LS_10),
+      ],
+    },
+  },
+};
+
+export const SCIENCE_SUBJECT: SubjectDefinition = {
+  id: 'science',
+  name: {
+    en: 'Environment & Science (Paribesh o Bigyan)',
+    bn: 'পরিবেশ ও বিজ্ঞান (Environment & Science)',
+    hi: 'परिवेश ओ विज्ञान (Environment & Science)',
+  },
+  shortDesc: {
+    en: 'Official WBBSE Upper Primary Paribesh o Bigyan textbook covering physical, chemical, biological, and environmental sciences.',
+    bn: 'পশ্চিমবঙ্গ মধ্যশিক্ষা পর্ষদের ষষ্ঠ, সপ্তম ও অষ্টম শ্রেণির পরিবেশ ও বিজ্ঞান পাঠ্যপুস্তকের সম্পূর্ণ অধ্যায়সমূহ।',
+    hi: 'WBBSE कक्षा 6, 7 और 8 की आधिकारिक परिवेश ओ विज्ञान पाठ्यपुस्तक के सभी अध्याय।',
+  },
+  domainGuardKeywords: [
+    'science', 'force', 'heat', 'light', 'atom', 'molecule', 'reaction', 'cell', 'plant', 'animal', 'human', 'biodiversity',
+  ],
+  curriculumByClass: {
+    5: {
+      status: 'integrated_evs',
+      verificationStatus: 'verified',
+      applicableToClass: false,
+      textbookName: TB_EVS_5,
+      syllabusVersion: 'WBBPE Primary Syllabus',
+      officialSource: 'WBBPE — Amader Paribesh Class V (Science Units)',
+      boardNote: {
+        en: 'In Class 5, Science is taught through the official Amader Paribesh textbook.',
+        bn: 'পঞ্চম শ্রেণিতে বিজ্ঞান আমাদের পরিবেশ পাঠ্যপুস্তকের অন্তর্ভুক্ত।',
+        hi: 'कक्षा 5 में विज्ञान आमादेर परिवेश पाठ्यपुस्तक के अंतर्गत पढ़ाया जाता है।',
+      },
+      chapters: [
+        EVS_SUBJECT.curriculumByClass[5].chapters[0],
+        EVS_SUBJECT.curriculumByClass[5].chapters[1],
+        EVS_SUBJECT.curriculumByClass[5].chapters[3],
+        EVS_SUBJECT.curriculumByClass[5].chapters[5],
+        EVS_SUBJECT.curriculumByClass[5].chapters[9],
+      ],
+    },
+    6: {
+      status: 'prescribed',
+      verificationStatus: 'verified',
+      applicableToClass: true,
+      textbookName: TB_SCI_6,
+      syllabusVersion: 'WBBSE Upper Primary Syllabus (Current Edition)',
+      officialSource: 'WBBSE — Paribesh o Bigyan Class VI (Chapters 1–12)',
+      boardNote: {
+        en: 'Official WBBSE Class VI Paribesh o Bigyan — All 12 Verified Chapters.',
+        bn: 'পশ্চিমবঙ্গ মধ্যশিক্ষা পর্ষদ (WBBSE) ষষ্ঠ শ্রেণি পরিবেশ ও বিজ্ঞান — সম্পূর্ণ ১২টি অধ্যায়।',
+        hi: 'WBBSE कक्षा 6 परिवेश ओ विज्ञान — सभी 12 सत्यापित अध्याय।',
+      },
+      chapters: CLASS_6_SCIENCE_CHAPTERS,
+    },
+    7: {
+      status: 'prescribed',
+      verificationStatus: 'verified',
+      applicableToClass: true,
+      textbookName: TB_SCI_7,
+      syllabusVersion: 'WBBSE Upper Primary Syllabus (Current Edition)',
+      officialSource: 'WBBSE — Paribesh o Bigyan Class VII (Chapters 1–9)',
+      boardNote: {
+        en: 'Official WBBSE Class VII Paribesh o Bigyan — All 9 Verified Chapters.',
+        bn: 'পশ্চিমবঙ্গ মধ্যশিক্ষা পর্ষদ (WBBSE) সপ্তম শ্রেণি পরিবেশ ও বিজ্ঞান — সম্পূর্ণ ৯টি অধ্যায়।',
+        hi: 'WBBSE कक्षा 7 परिवेश ओ विज्ञान — सभी 9 सत्यापित अध्याय।',
+      },
+      chapters: CLASS_7_SCIENCE_CHAPTERS,
+    },
+    8: {
+      status: 'prescribed',
+      verificationStatus: 'verified',
+      applicableToClass: true,
+      textbookName: TB_SCI_8,
+      syllabusVersion: 'WBBSE Upper Primary Syllabus (Current Edition)',
+      officialSource: 'WBBSE — Paribesh o Bigyan Class VIII (Chapters 1–11)',
+      boardNote: {
+        en: 'Official WBBSE Class VIII Paribesh o Bigyan — All 11 Verified Chapters.',
+        bn: 'পশ্চিমবঙ্গ মধ্যশিক্ষা পর্ষদ (WBBSE) অষ্টম শ্রেণি পরিবেশ ও বিজ্ঞান — সম্পূর্ণ ১১টি অধ্যায়।',
+        hi: 'WBBSE कक्षा 8 परिवेश ओ विज्ञान — सभी 11 सत्यापित अध्याय।',
+      },
+      chapters: CLASS_8_SCIENCE_CHAPTERS,
+    },
+    9: {
+      status: 'integrated_evs',
+      verificationStatus: 'verified',
+      applicableToClass: false,
+      textbookName: TB_PS_9,
+      syllabusVersion: 'WBBSE Secondary Syllabus',
+      officialSource: 'WBBSE Class IX Physical Science & Life Science',
+      boardNote: {
+        en: 'In Class 9, Science splits into two official textbooks: Physical Science and Life Science.',
+        bn: 'নবম শ্রেণিতে বিজ্ঞান দুটি স্বতন্ত্র বিষয়ে বিভক্ত: ভৌতবিজ্ঞান ও জীবন বিজ্ঞান।',
+        hi: 'कक्षा 9 में विज्ञान दो अलग विषयों में विभाजित है: भौतिक विज्ञान और जीवन विज्ञान।',
+      },
+      chapters: [],
+    },
+    10: {
+      status: 'integrated_evs',
+      verificationStatus: 'verified',
+      applicableToClass: false,
+      textbookName: TB_PS_10,
+      syllabusVersion: 'WBBSE Madhyamik Syllabus',
+      officialSource: 'WBBSE Class X Physical Science & Life Science',
+      boardNote: {
+        en: 'In Class 10, Science splits into two official textbooks: Physical Science and Life Science.',
+        bn: 'দশম শ্রেণিতে বিজ্ঞান দুটি স্বতন্ত্র বিষয়ে বিভক্ত: ভৌতবিজ্ঞান ও জীবন বিজ্ঞান।',
+        hi: 'कक्षा 10 में विज्ञान दो अलग विषयों में विभाजित है: भौतिक विज्ञान और जीवन विज्ञान।',
+      },
+      chapters: [],
+    },
+  },
+};
+
+export const PHYSICAL_SCIENCE_SUBJECT: SubjectDefinition = {
+  id: 'physical_science',
+  name: {
+    en: 'Physical Science',
+    bn: 'ভৌতবিজ্ঞান (Physical Science)',
+    hi: 'भौतिक विज्ञान (Physical Science)',
+  },
+  shortDesc: {
+    en: 'Physics, chemistry, atomic structure, gas laws, light, electricity, metallurgy & organic chemistry from WBBSE Bhouto Bigyan o Paribesh.',
+    bn: 'পশ্চিমবঙ্গ মধ্যশিক্ষা পর্ষদের ভৌতবিজ্ঞান ও পরিবেশ পাঠ্যপুস্তকের পদার্থবিদ্যা ও রসায়নের সম্পূর্ণ অধ্যায়সমূহ।',
+    hi: 'WBBSE भौतविज्ञान ओ परिवेश पाठ्यपुस्तक से भौतिकी और रसायन विज्ञान के सभी सत्यापित अध्याय।',
+  },
+  domainGuardKeywords: [
+    'force', 'motion', 'pressure', 'heat', 'light', 'lens', 'prism', 'current', 'ohm', 'atom', 'mole', 'acid', 'gas', 'periodic', 'electrolysis', 'metallurgy', 'organic',
+  ],
+  curriculumByClass: {
+    5: {
+      status: 'integrated_evs',
+      verificationStatus: 'verified',
+      applicableToClass: false,
+      textbookName: TB_EVS_5,
+      syllabusVersion: 'WBBPE Primary Syllabus',
+      officialSource: 'WBBPE — Amader Paribesh Class V',
+      boardNote: {
+        en: 'Integrated in Class 5 Amader Paribesh (Physical Environment, Minerals, Energy & Sky).',
+        bn: 'পঞ্চম শ্রেণিতে আমাদের পরিবেশ পাঠ্যপুস্তকের ভৌত পরিবেশ ও শক্তি অধ্যায়ের অন্তর্ভুক্ত।',
+        hi: 'कक्षा 5 में आमादेर परिवेश (भौतिक पर्यावरण और ऊर्जा) के अंतर्गत समाहित।',
+      },
+      chapters: [
+        EVS_SUBJECT.curriculumByClass[5].chapters[1],
+        EVS_SUBJECT.curriculumByClass[5].chapters[5],
+        EVS_SUBJECT.curriculumByClass[5].chapters[6],
+        EVS_SUBJECT.curriculumByClass[5].chapters[9],
+      ],
+    },
+    6: {
+      status: 'integrated_evs',
+      verificationStatus: 'verified',
+      applicableToClass: false,
+      textbookName: TB_SCI_6,
+      syllabusVersion: 'WBBSE Upper Primary Syllabus',
+      officialSource: 'WBBSE — Paribesh o Bigyan Class VI (Physical & Chemical Chapters)',
+      boardNote: {
+        en: 'In Class 6, Physical & Chemical Science is part of the prescribed Paribesh o Bigyan textbook.',
+        bn: 'ষষ্ঠ শ্রেণিতে ভৌত ও রাসায়নিক বিজ্ঞান পরিবেশ ও বিজ্ঞান পাঠ্যপুস্তকের অংশ।',
+        hi: 'कक्षा 6 में भौतिक व रासायनिक विज्ञान परिवेश ओ विज्ञान पाठ्यपुस्तक का हिस्सा है।',
+      },
+      chapters: [
+        CLASS_6_SCIENCE_CHAPTERS[1],
+        CLASS_6_SCIENCE_CHAPTERS[2],
+        CLASS_6_SCIENCE_CHAPTERS[3],
+        CLASS_6_SCIENCE_CHAPTERS[4],
+        CLASS_6_SCIENCE_CHAPTERS[5],
+        CLASS_6_SCIENCE_CHAPTERS[6],
+        CLASS_6_SCIENCE_CHAPTERS[8],
+      ],
+    },
+    7: {
+      status: 'integrated_evs',
+      verificationStatus: 'verified',
+      applicableToClass: false,
+      textbookName: TB_SCI_7,
+      syllabusVersion: 'WBBSE Upper Primary Syllabus',
+      officialSource: 'WBBSE — Paribesh o Bigyan Class VII (Physical & Chemical Chapters)',
+      boardNote: {
+        en: 'In Class 7, Physical & Chemical Science is part of the prescribed Paribesh o Bigyan textbook.',
+        bn: 'সপ্তম শ্রেণিতে ভৌত ও রাসায়নিক বিজ্ঞান পরিবেশ ও বিজ্ঞান পাঠ্যপুস্তকের অংশ।',
+        hi: 'कक्षा 7 में भौतिक व रासायनिक विज्ञान परिवेश ओ विज्ञान पाठ्यपुस्तक का हिस्सा है।',
+      },
+      chapters: [
+        CLASS_7_SCIENCE_CHAPTERS[0],
+        CLASS_7_SCIENCE_CHAPTERS[1],
+        CLASS_7_SCIENCE_CHAPTERS[2],
+        CLASS_7_SCIENCE_CHAPTERS[3],
+      ],
+    },
+    8: {
+      status: 'integrated_evs',
+      verificationStatus: 'verified',
+      applicableToClass: false,
+      textbookName: TB_SCI_8,
+      syllabusVersion: 'WBBSE Upper Primary Syllabus',
+      officialSource: 'WBBSE — Paribesh o Bigyan Class VIII (Physical & Chemical Chapters)',
+      boardNote: {
+        en: 'In Class 8, Physical & Chemical Science is part of the prescribed Paribesh o Bigyan textbook.',
+        bn: 'অষ্টম শ্রেণিতে ভৌত ও রাসায়নিক বিজ্ঞান পরিবেশ ও বিজ্ঞান পাঠ্যপুস্তকের অংশ।',
+        hi: 'कक्षा 8 में भौतिक व रासायनिक विज्ञान परिवेश ओ विज्ञान पाठ्यपुस्तक का हिस्सा है।',
+      },
+      chapters: [
+        CLASS_8_SCIENCE_CHAPTERS[0],
+        CLASS_8_SCIENCE_CHAPTERS[1],
+        CLASS_8_SCIENCE_CHAPTERS[2],
+        CLASS_8_SCIENCE_CHAPTERS[3],
+        CLASS_8_SCIENCE_CHAPTERS[4],
+      ],
+    },
+    9: {
+      status: 'prescribed',
+      verificationStatus: 'verified',
+      applicableToClass: true,
+      textbookName: TB_PS_9,
+      syllabusVersion: 'WBBSE Secondary Curriculum (Current Edition)',
+      officialSource: 'WBBSE — Bhouto Bigyan o Paribesh Class IX (Chapters 1–7)',
+      boardNote: {
+        en: 'Official WBBSE Class IX Bhouto Bigyan o Paribesh — All 7 Verified Chapters (with Sub-units).',
+        bn: 'পশ্চিমবঙ্গ মধ্যশিক্ষা পর্ষদ (WBBSE) নবম শ্রেণি ভৌতবিজ্ঞান ও পরিবেশ — সম্পূর্ণ ৭টি অধ্যায়।',
+        hi: 'WBBSE कक्षा 9 भौतविज्ञान ओ परिवेश — सभी 7 सत्यापित अध्याय।',
+      },
+      chapters: [
+        ch('ps9_c1', 1, 'Ch 1: Measurement (Physical Quantities, Units, Dimensions & Measuring Instruments)', 'অধ্যায় ১: পরিমাপ (ভৌত রাশি, একক, মাত্রা ও পরিমাপক যন্ত্র)', 'अध्याय 1: मापन (भौतिक राशियाँ, मात्रक, विमाएँ और मापक यंत्र)', ['Fundamental & derived units', 'Dimensional formulae [M L T]', 'Ordinary balance, measuring cylinder, stopwatch'], TB_PS_9),
+        ch('ps9_c2', 2, 'Ch 2: Force and Motion (Kinematics, Newton Laws & Conservation of Momentum)', 'অধ্যায় ২: বল ও গতি (নিউটনের গতিসূত্র ও রৈখিক ভরবেগের সংরক্ষণ)', 'अध्याय 2: बल और गति (न्यूटन के गति नियम और रेखीय संवेग संरक्षण)', ['Displacement, velocity, acceleration', 'Equations of motion v = u + at, s = ut + ½at^2, v^2 = u^2 + 2as', "Newton's 3 laws, impulse, recoil of gun"], TB_PS_9),
+        ch('ps9_c3', 3, 'Ch 3: Matter — Structure and Properties (Pressure, Archimedes, Bernoulli, Surface Tension, Viscosity & Elasticity)', 'অধ্যায় ৩: পদার্থ: গঠন ও ধর্ম (চাপ, আর্কিমিডিসের নীতি, পৃষ্ঠটান, সান্দ্রতা ও স্থিতিস্থাপকতা)', 'अध्याय 3: पदार्थ: संरचना और गुणधर्म (दाब, आर्किमिडीज सिद्धांत, पृष्ठ तनाव, श्यानता और प्रत्यास्थता)', ['Hydrostatic pressure P = hρg, barometer, siphon', "Archimedes' principle & floatation", "Bernoulli's theorem", "Surface tension, viscosity, Hooke's law & Young's modulus"], TB_PS_9),
+        ch('ps9_c4_1', 4, 'Ch 4.1 & 4.2: Atomic Structure & Mole Concept', 'অধ্যায় ৪.১ ও ৪.২: পরমাণুর গঠন এবং মোলের ধারণা', 'अध्याय 4.1 व 4.2: परमाणु की संरचना और मोल अवधारणा', ['Rutherford & Bohr models', 'Isotopes, isobars, isotones', "Avogadro's number (6.022 × 10^23), molar mass, molar volume (22.4 L at STP)"], TB_PS_9),
+        ch('ps9_c4_2', 5, 'Ch 4.3 & 4.4: Solution and Acids, Bases & Salts', 'অধ্যায় ৪.৩ ও ৪.৪: দ্রবণ এবং অ্যাসিড, ক্ষার ও লবণ', 'अध्याय 4.3 व 4.4: विलयन तथा अम्ल, क्षार और लवण', ['True solution, colloid, suspension, Tyndall effect', 'Saturated, unsaturated, supersaturated solutions & solubility curves', 'Arrhenius theory, pH scale, indicators, neutralization, antacids, acid rain'], TB_PS_9),
+        ch('ps9_c4_3', 6, 'Ch 4.5: Separation of Components of Mixtures & Water', 'অধ্যায় ৪.৫ ও ৪.৬: মিশ্রণের উপাদানের পৃথকীকরণ এবং জল', 'अध्याय 4.5 व 4.6: मिश्रण के घटकों का पृथक्करण और जल', ['Fractional distillation, separating funnel, chromatography', 'Hardness of water (temporary & permanent), ion-exchange resin, water pollution (Arsenic, Fluoride)'], TB_PS_9),
+        ch('ps9_c5', 7, 'Ch 5: Work, Power and Energy', 'অধ্যায় ৫: কার্য, ক্ষমতা ও শক্তি', 'अध्याय 5: कार्य, शक्ति और ऊर्जा', ['Work W = F·s cosθ, Joule and Erg', 'Power P = W/t, Watt and Horsepower (746 W)', 'Kinetic energy (½mv^2) & Potential energy (mgh)', 'Conservation of mechanical energy in free fall'], TB_PS_9),
+        ch('ps9_c6', 8, 'Ch 6: Heat (Calorimetry, Latent Heat & Anomalous Expansion of Water)', 'অধ্যায় ৬: তাপ (ক্যালোরিমিতি, লীন তাপ ও জলের ব্যতিক্রমী প্রসারণ)', 'अध्याय 6: ऊष्मा (कैलोरीमिति, गुप्त ऊष्मा और जल का असंगत प्रसार)', ['Principle of calorimetry Q = msΔt', 'Mechanical equivalent of heat W = JH', 'Saturated vs unsaturated vapour, dew, fog', 'Anomalous expansion of water (0°C to 4°C) and aquatic survival'], TB_PS_9),
+        ch('ps9_c7', 9, 'Ch 7: Sound (Waves, Echo, SONAR & Human Ear)', 'অধ্যায় ৭: শব্দ (তরঙ্গ, প্রতিধ্বনি, SONAR ও মানুষের কর্ণ)', 'अध्याय 7: ध्वनि (तरंगें, प्रतिध্বनि, SONAR और मानव कर्ण)', ['Longitudinal vs transverse waves', 'v = nλ (wave velocity, frequency, wavelength)', 'Minimum distance for echo (16.6 m / 17 m in air)', 'Infrasonic, audible (20 Hz–20 kHz), ultrasonic waves & SONAR'], TB_PS_9),
+      ],
+    },
+    10: {
+      status: 'prescribed',
+      verificationStatus: 'verified',
+      applicableToClass: true,
+      textbookName: TB_PS_10,
+      syllabusVersion: 'WBBSE Madhyamik Pariksha Syllabus (Current Edition)',
+      officialSource: 'WBBSE — Bhouto Bigyan o Paribesh Class X (Units 1 to 8.6)',
+      boardNote: {
+        en: 'Official WBBSE Class X Bhouto Bigyan o Paribesh (Madhyamik) — All 13 Verified Chapters across 8 Units.',
+        bn: 'পশ্চিমবঙ্গ মধ্যশিক্ষা পর্ষদ (WBBSE) দশম শ্রেণি ভৌতবিজ্ঞান ও পরিবেশ (মাধ্যমিক) — সম্পূর্ণ ১৩টি অধ্যায় (৮টি একক)।',
+        hi: 'WBBSE कक्षा 10 भौतविज्ञान ओ परिवेश (माध्यमिक परीक्षा) — सभी 13 सत्यापित अध्याय (8 इकाइयाँ)।',
+      },
+      chapters: [
+        ch('ps10_c1', 1, 'Ch 1: Concerns About Our Environment', 'অধ্যায় ১: পরিবেশের জন্য ভাবনা', 'अध्याय 1: पर्यावरण के प्रति चिंता', ['Layers of atmosphere (Troposphere, Stratosphere, Mesosphere, Thermosphere)', 'Ozone layer depletion (CFCs, Montreal Protocol)', 'Greenhouse effect & Global warming', 'Coalbed methane, biogas, solar/wind/tidal energy'], TB_PS_10),
+        ch('ps10_c2', 2, 'Ch 2: Behaviour of Gases', 'অধ্যায় ২: গ্যাসের আচরণ', 'अध्याय 2: गैसों का व्यवहार', ["Boyle's Law (PV = constant)", "Charles's Law & Absolute Zero (-273°C = 0 K)", "Avogadro's Law", 'Ideal Gas Equation PV = nRT, Graham diffusion law, Kinetic theory of gases'], TB_PS_10),
+        ch('ps10_c3', 3, 'Ch 3: Chemical Calculations', 'অধ্যায় ৩: রাসায়নিক গণনা', 'अध्याय 3: रासायनिक गणनाएँ', ['Stoichiometric mass-mass, mass-volume, and volume-volume calculations at STP', 'Vapour density and molecular weight relation (M = 2 × D)'], TB_PS_10),
+        ch('ps10_c4', 4, 'Ch 4: Thermal Phenomena', 'অধ্যায় ৪: তাপের ঘটনাসমূহ', 'अध्याय 4: तापीय परिघटनाएँ', ['Linear (α), superficial (β), and volume (γ) expansion of solids (α = β/2 = γ/3)', 'Real and apparent expansion of liquids', 'Volume and pressure coefficients of gases', 'Thermal conductivity & Wiedemann-Franz law'], TB_PS_10),
+        ch('ps10_c5', 5, 'Ch 5: Light', 'অধ্যায় ৫: আলো', 'अध्याय 5: प्रकाश', ['Concave and convex mirrors (r = 2f)', "Snell's law of refraction, refractive index, prism deviation δ = i1 + i2 - A", 'Convex and concave lenses, magnification, power of lens', 'Human eye defects (Myopia, Hypermetropia), dispersion, Rayleigh scattering (1/λ^4)'], TB_PS_10),
+        ch('ps10_c6', 6, 'Ch 6: Current Electricity', 'অধ্যায় ৬: চলতড়িৎ', 'अध्याय 6: धारा विद्युत', ["Coulomb's law, potential difference, EMF", "Ohm's Law, resistivity, series & parallel resistors", "Joule's heating law H = I^2Rt, electric power (kWh / BOT unit)", "Fleming's Left-Hand Rule, Barlow's wheel, Faraday's electromagnetic induction, Lenz's law, AC/DC dynamo & motor, domestic wiring (earth, live, neutral)"], TB_PS_10),
+        ch('ps10_c7', 7, 'Ch 7: Atomic Nucleus (Radioactivity, Fission & Fusion)', 'অধ্যায় ৭: পরমাণুর নিউক্লিয়াস', 'अध्याय 7: परमाणु नाभिक', ['Properties of α, β, γ rays', 'Radioactive decay laws', 'Mass defect & Einstein E = mc^2', 'Nuclear fission (chain reaction, nuclear reactor) & nuclear fusion (solar energy)'], TB_PS_10),
+        ch('ps10_c8_1', 8, 'Ch 8.1: Periodic Table and Periodicity of Properties of Elements', 'অধ্যায় ৮.১: পর্যায় সারণি এবং মৌলের ধর্মের পর্যাবৃত্ততা', 'अध्याय 8.1: आवर्त सारणी और तत्वों के गुणों की आवर्तिता', ["Dobereiner's triads, Mendeleev's & Modern Periodic Law (Moseley)", '18 groups & 7 periods', 'Periodic trends: atomic radius, ionization energy, electronegativity, oxidizing/reducing power'], TB_PS_10),
+        ch('ps10_c8_2', 9, 'Ch 8.2: Ionic and Covalent Bonding', 'অধ্যায় ৮.২: আয়নীয় ও সমযোজী বন্ধন', 'अध्याय 8.2: आयनिक और सहसंयोजक आबंधन', ['Electrovalent (ionic) compounds (NaCl, MgO, CaO)', 'Lewis dot structures of covalent molecules (H2O, NH3, CH4, CO2, C2H4, C2H2)', 'Comparison of properties of ionic and covalent compounds'], TB_PS_10),
+        ch('ps10_c8_3', 10, 'Ch 8.3: Electricity and Chemical Reactions (Electrolysis)', 'অধ্যায় ৮.৩: তড়িৎপ্রবাহ ও রাসায়নিক বিক্রিয়া', 'अध्याय 8.3: विद्युत धारा और रासायनिक अभिक्रियाएँ (विद्युत-अपघटन)', ['Strong and weak electrolytes', 'Cathode (reduction) and anode (oxidation)', 'Electrolysis of acidulated water & CuSO4 solution', 'Electroplating with Ni, Cu, Ag, Au and electro-refining of copper'], TB_PS_10),
+        ch('ps10_c8_4', 11, 'Ch 8.4: Inorganic Chemistry in the Laboratory and in Industry', 'অধ্যায় ৮.৪: পরীক্ষাগার ও রাসায়নিক শিল্পে অজৈব রসায়ন', 'अध्याय 8.4: प्रयोगशाला और रासायनिक उद्योग में अकार्बनिक रसायन', ['Lab preparation, drying & properties of NH3 and H2S, Nessler reagent', 'Haber process (NH3), Ostwald process (HNO3), Contact process (H2SO4 & oleum)', 'Urea manufacture'], TB_PS_10),
+        ch('ps10_c8_5', 12, 'Ch 8.5: Metallurgy', 'অধ্যায় ৮.৫: ধাতুবিদ্যা', 'अध्याय 8.5: धातुकर्म', ['Ores of Fe (haematite), Cu (copper pyrites), Zn (zinc blende), Al (bauxite)', 'Thermite process, electrolytic reduction of alumina', 'Alloys (brass, bronze, duralumin, stainless steel)', 'Rusting of iron and galvanization'], TB_PS_10),
+        ch('ps10_c8_6', 13, 'Ch 8.6: Organic Chemistry', 'অধ্যায় ৮.6: জৈব রসায়ন', 'अध्याय 8.6: कार्बनिक रसायन', ['Catenation & tetravalency of carbon', 'Alkanes, alkenes, alkynes, functional groups (-OH, -CHO, >C=O, -COOH)', 'Structural & functional isomerism, IUPAC nomenclature', 'Reactions of methane, ethylene, acetylene, ethanol, acetic acid; PVC, Teflon, polythene'], TB_PS_10),
+      ],
+    },
+  },
+};
+
+export const LIFE_SCIENCE_SUBJECT: SubjectDefinition = {
+  id: 'life_science',
+  name: {
+    en: 'Life Science',
+    bn: 'জীবন বিজ্ঞান (Life Science)',
+    hi: 'जीवन विज्ञान (Life Science)',
+  },
+  shortDesc: {
+    en: 'Biology, physiology, cell division, genetics, evolution, plant & animal hormones, nervous system, and ecology from WBBSE Jiban Bigyan o Paribesh.',
+    bn: 'পশ্চিমবঙ্গ মধ্যশিক্ষা পর্ষদের জীবন বিজ্ঞান ও পরিবেশ পাঠ্যপুস্তকের শারীরবিদ্যা, কোষ বিভাজন, বংশগতি, অভিব্যক্তি ও বাস্তুবিদ্যা।',
+    hi: 'WBBSE जीवन विज्ञान ओ परिवेश पाठ्यपुस्तक से शरीर क्रिया विज्ञान, कोशिका विभाजन, आनुवंशिकी, विकास और पारिस्थितिकी।',
+  },
+  domainGuardKeywords: [
+    'cell', 'photosynthesis', 'respiration', 'hormone', 'nervous', 'neuron', 'mitosis', 'meiosis', 'dna', 'chromosome', 'mendel', 'genetics', 'evolution', 'darwin', 'ecosystem', 'biodiversity',
+  ],
+  curriculumByClass: {
+    5: {
+      status: 'integrated_evs',
+      verificationStatus: 'verified',
+      applicableToClass: false,
+      textbookName: TB_EVS_5,
+      syllabusVersion: 'WBBPE Primary Syllabus',
+      officialSource: 'WBBPE — Amader Paribesh Class V',
+      boardNote: {
+        en: 'Integrated in Class 5 Amader Paribesh (Human Body, Biodiversity, Forests & Agriculture).',
+        bn: 'পঞ্চম শ্রেণিতে আমাদের পরিবেশ পাঠ্যপুস্তকের মানবদেহ ও জীববৈচিত্র্য অধ্যায়ের অন্তর্ভুক্ত।',
+        hi: 'कक्षा 5 में आमादेर परिवेश (मानव शरीर और जैव विविधता) में समाहित।',
+      },
+      chapters: [
+        EVS_SUBJECT.curriculumByClass[5].chapters[0],
+        EVS_SUBJECT.curriculumByClass[5].chapters[1],
+        EVS_SUBJECT.curriculumByClass[5].chapters[3],
+        EVS_SUBJECT.curriculumByClass[5].chapters[4],
+      ],
+    },
+    6: {
+      status: 'integrated_evs',
+      verificationStatus: 'verified',
+      applicableToClass: false,
+      textbookName: TB_SCI_6,
+      syllabusVersion: 'WBBSE Upper Primary Syllabus',
+      officialSource: 'WBBSE — Paribesh o Bigyan Class VI (Biological & Environmental Chapters)',
+      boardNote: {
+        en: 'In Class 6, Life & Environmental Science is part of the prescribed Paribesh o Bigyan textbook.',
+        bn: 'ষষ্ঠ শ্রেণিতে জীবন ও পরিবেশ বিজ্ঞান পরিবেশ ও বিজ্ঞান পাঠ্যপুস্তকের অংশ।',
+        hi: 'कक्षा 6 में जीवन व पर्यावरण विज्ञान परिवेश ओ विज्ञान পাঠ्यपुस्तक का हिस्सा है।',
+      },
+      chapters: [
+        CLASS_6_SCIENCE_CHAPTERS[0],
+        CLASS_6_SCIENCE_CHAPTERS[7],
+        CLASS_6_SCIENCE_CHAPTERS[9],
+        CLASS_6_SCIENCE_CHAPTERS[10],
+        CLASS_6_SCIENCE_CHAPTERS[11],
+      ],
+    },
+    7: {
+      status: 'integrated_evs',
+      verificationStatus: 'verified',
+      applicableToClass: false,
+      textbookName: TB_SCI_7,
+      syllabusVersion: 'WBBSE Upper Primary Syllabus',
+      officialSource: 'WBBSE — Paribesh o Bigyan Class VII (Biological & Environmental Chapters)',
+      boardNote: {
+        en: 'In Class 7, Life & Environmental Science is part of the prescribed Paribesh o Bigyan textbook.',
+        bn: 'সপ্তম শ্রেণিতে জীবন ও পরিবেশ বিজ্ঞান পরিবেশ ও বিজ্ঞান পাঠ্যপুস্তকের অংশ।',
+        hi: 'कक्षा 7 में जीवन व पर्यावरण विज्ञान परिवेश ओ विज्ञान পাঠ्यपुस्तक का हिस्सा है।',
+      },
+      chapters: [
+        CLASS_7_SCIENCE_CHAPTERS[4],
+        CLASS_7_SCIENCE_CHAPTERS[5],
+        CLASS_7_SCIENCE_CHAPTERS[6],
+        CLASS_7_SCIENCE_CHAPTERS[7],
+        CLASS_7_SCIENCE_CHAPTERS[8],
+      ],
+    },
+    8: {
+      status: 'integrated_evs',
+      verificationStatus: 'verified',
+      applicableToClass: false,
+      textbookName: TB_SCI_8,
+      syllabusVersion: 'WBBSE Upper Primary Syllabus',
+      officialSource: 'WBBSE — Paribesh o Bigyan Class VIII (Biological & Environmental Chapters)',
+      boardNote: {
+        en: 'In Class 8, Life & Environmental Science is part of the prescribed Paribesh o Bigyan textbook.',
+        bn: 'অষ্টম শ্রেণিতে জীবন ও পরিবেশ বিজ্ঞান পরিবেশ ও বিজ্ঞান পাঠ্যপুস্তকের অংশ।',
+        hi: 'कक्षा 8 में जीवन व पर्यावरण विज्ञान परिवेश ओ विज्ञान পাঠ्यपुस्तक का हिस्सा है।',
+      },
+      chapters: [
+        CLASS_8_SCIENCE_CHAPTERS[5],
+        CLASS_8_SCIENCE_CHAPTERS[6],
+        CLASS_8_SCIENCE_CHAPTERS[7],
+        CLASS_8_SCIENCE_CHAPTERS[8],
+        CLASS_8_SCIENCE_CHAPTERS[9],
+        CLASS_8_SCIENCE_CHAPTERS[10],
+      ],
+    },
+    9: {
+      status: 'prescribed',
+      verificationStatus: 'verified',
+      applicableToClass: true,
+      textbookName: TB_LS_9,
+      syllabusVersion: 'WBBSE Secondary Curriculum (Current Edition)',
+      officialSource: 'WBBSE — Jiban Bigyan o Paribesh Class IX (Chapters 1–5)',
+      boardNote: {
+        en: 'Official WBBSE Class IX Jiban Bigyan o Paribesh — All 5 Verified Chapters.',
+        bn: 'পশ্চিমবঙ্গ মধ্যশিক্ষা পর্ষদ (WBBSE) নবম শ্রেণি জীবন বিজ্ঞান ও পরিবেশ — সম্পূর্ণ ৫টি অধ্যায়।',
+        hi: 'WBBSE कक्षा 9 जीवन विज्ञान ओ परिवेश — सभी 5 सत्यापित अध्याय।',
+      },
+      chapters: [
+        ch('ls9_c1', 1, 'Ch 1: Life and Its Diversity (Origin of Life, Taxonomy & Five Kingdoms)', 'অধ্যায় ১: জীবন ও তার বৈচিত্র্য', 'अध्याय 1: जीवन और उसकी विविधता', ['Oparin-Haldane chemosynthetic origin of life', 'Binomial nomenclature (Linnaeus)', 'Whittaker Five Kingdom classification', 'Characteristics of Plantae & Animalia phyla (Porifera to Chordata)'], TB_LS_9),
+        ch('ls9_c2', 2, 'Ch 2: Levels of Organization of Life (Biomolecules, Cell Organelles, Tissues & Organs)', 'অধ্যায় ২: জীবন সংগঠনের স্তর', 'अध्याय 2: जीवन संगठन के स्तर', ['Carbohydrates, proteins, lipids, nucleic acids (DNA/RNA), vitamins & minerals', 'Structure & function of cell organelles', 'Meristematic & permanent plant tissues (xylem, phloem)', 'Epithelial, connective, muscular, and nervous animal tissues'], TB_LS_9),
+        ch('ls9_c3', 3, 'Ch 3: Physiological Processes of Life (Photosynthesis, Transpiration, Respiration, Nutrition, Circulation & Excretion)', 'অধ্যায় ৩: জৈবনিক প্রক্রিয়া', 'अध्याय 3: जैविक प्रक्रियाएँ (प्रकाश संश्लेषण, श्वसन, पोषण, परिसंचरण और उत्सर्जन)', ['Light-dependent & Calvin cycle stages of photosynthesis', 'Transpiration & ascent of sap', 'Glycolysis, Krebs cycle, aerobic vs anaerobic respiration', 'Human digestive system & BMR', 'ABO/Rh blood groups, double circulation, cardiac cycle', 'Nephron structure & urine formation'], TB_LS_9),
+        ch('ls9_c4', 4, 'Ch 4: Biology and Human Welfare (Immunity, Vaccination, Pathogens & Microbes)', 'অধ্যায় ৪: জীববিদ্যা ও মানবকল্যাণ', 'अध्याय 4: जीव विज्ञान और मानव कल्याण (प्रतिरक्षा, टीकाकरण और रोगाणु)', ['Antigen-antibody interaction, innate & acquired immunity', 'Vaccination (BCG, DPT, OPV, MMR)', 'Diseases: Diarrhoea, Malaria, Diphtheria, Pneumonia, Tetanus, Tuberculosis, Dengue, Hepatitis, AIDS', 'Microbes in biofertilizers & biological control'], TB_LS_9),
+        ch('ls9_c5', 5, 'Ch 5: Environment and Its Resources (Ecology, Energy Flow & Conservation)', 'অধ্যায় ৫: পরিবেশ ও তার সম্পদ', 'अध्याय 5: पर्यावरण और उसके संसाधन', ['Population & community ecology (predation, parasitism, competition, mutualism)', 'Food chain, food web, Lindeman 10% energy flow law', 'Carbon, Oxygen, and Water cycles', 'Conservation of water, forest, food & energy'], TB_LS_9),
+      ],
+    },
+    10: {
+      status: 'prescribed',
+      verificationStatus: 'verified',
+      applicableToClass: true,
+      textbookName: TB_LS_10,
+      syllabusVersion: 'WBBSE Madhyamik Pariksha Syllabus (Current Edition)',
+      officialSource: 'WBBSE — Jiban Bigyan o Paribesh Class X (Chapters 1–5)',
+      boardNote: {
+        en: 'Official WBBSE Class X Jiban Bigyan o Paribesh (Madhyamik Pariksha) — All 5 Verified Chapters.',
+        bn: 'পশ্চিমবঙ্গ মধ্যশিক্ষা পর্ষদ (WBBSE) দশম শ্রেণি জীবন বিজ্ঞান ও পরিবেশ (মাধ্যমিক) — সম্পূর্ণ ৫টি অধ্যায়।',
+        hi: 'WBBSE कक्षा 10 जीवन विज्ञान ओ परिवेश (माध्यमिक परीक्षा) — सभी 5 सत्यापित अध्याय।',
+      },
+      chapters: [
+        ch('ls10_c1', 1, 'Ch 1: Control and Coordination in Living Organisms', 'অধ্যায় ১: জীবজগতে নিয়ন্ত্রণ ও সমন্বয়', 'अध्याय 1: जीव जगत में नियंत्रण और समन्वय', ['Tactic, tropic, and nastic movements in plants', 'Plant hormones: Auxin, Gibberellin, Cytokinin', 'Endocrine glands & animal hormones (Pituitary, Thyroid, Adrenal, Pancreas, Gonads) & feedback control', 'Neuron, synapse, reflex arc, human brain & eye, locomotion in Amoeba, Paramoecium, Euglena, Fish, Bird & Human'], TB_LS_10),
+        ch('ls10_c2', 2, 'Ch 2: Continuity of Life (Chromosomes, Cell Division, Reproduction & Growth)', 'অধ্যায় ২: জীবনের প্রবাহমানতা', 'अध्याय 2: जीवन की निरंतरता (गुणसूत्र, कोशिका विभाजन और प्रजनन)', ['Chromosome morphology (centromere, telomere, satellite), euchromatin & heterochromatin, DNA & RNA', 'Cell cycle (Interphase G1, S, G2) & Amitosis, Mitosis (Prophase, Metaphase, Anaphase, Telophase, Cytokinesis), Meiosis', 'Asexual & vegetative propagation (micropropagation), alternation of世代 in fern, double fertilization in angiosperms'], TB_LS_10),
+        ch('ls10_c3', 3, 'Ch 3: Heredity and Several Common Genetic Diseases', 'অধ্যায় ৩: বংশগতি এবং কয়েকটি সাধারণ জিনগত রোগ', 'अध्याय 3: आनुवंशिकी और कुछ सामान्य आनुवंशिक रोग', ["Mendel's monohybrid (3:1, 1:2:1) & dihybrid (9:3:3:1) crosses", 'Law of Segregation & Law of Independent Assortment', 'Incomplete dominance in Mirabilis jalapa (1:2:1)', 'Sex determination in humans (XX-XY)', 'Thalassemia (α & β), Haemophilia (A & B), and Colour blindness, genetic counselling'], TB_LS_10),
+        ch('ls10_c4', 4, 'Ch 4: Evolution and Adaptation', 'অধ্যায় ৪: অভিব্যক্তি ও অভিযোজন', 'अध्याय 4: विकास और अनुकूलन', ['Miller-Urey experiment', "Lamarckism (use & disuse, inheritance of acquired characters) & Darwinism (natural selection, survival of the fittest)", 'Evidences of evolution: Eohippus to Equus fossil series, homologous & analogous organs, vestigial organs, vertebrate hearts & embryos', 'Adaptations in Cactus (xerophyte), Sundari (halophyte), Rohu (swim bladder), Pigeon (air sacs), Camel, Chimpanzee, and Honeybee waggle dance'], TB_LS_10),
+        ch('ls10_c5', 5, 'Ch 5: Environment, Its Resources and Their Conservation', 'অধ্যায় ৫: পরিবেশ, তার সম্পদ এবং তাদের সংরক্ষণ', 'अध्याय 5: पर्यावरण, उसके संसाधन और उनका संरक्षण', ['Steps of Nitrogen cycle (fixation, ammonification, nitrification, denitrification)', 'Air, water, soil, and noise pollution (BOD, eutrophication, biomagnification, asthma, bronchitis)', '4 Biodiversity Hotspots of India (Eastern Himalayas, Indo-Burma, Western Ghats, Sundaland)', 'In-situ (National Park, Sanctuary, Biosphere Reserve) & Ex-situ (Zoological/Botanical Garden, Cryopreservation), JFM & PBR, Conservation of Tiger, Rhino, Lion, Crocodile & Red Panda'], TB_LS_10),
+      ],
+    },
+  },
+};

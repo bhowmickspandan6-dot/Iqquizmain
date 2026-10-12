@@ -542,7 +542,62 @@ export default function App() {
       });
   }, []);
 
-  // Reset topic to "All Verified Chapters" when class or subject changes if the topic isn't in that curriculum
+  // Dynamically resolve subjects applicable to the selected class (Class -> Subjects -> Textbooks -> Chapters -> Topics)
+  const availableSubjectsForClass = useMemo(
+    () => getSubjectsForClass(selectedClass),
+    [selectedClass]
+  );
+
+  // Track previous class to detect explicit class switching
+  const prevClassRef = useRef<ClassLevel>(selectedClass);
+
+  // Clear or re-align selectedSubject if it does not belong to the newly selected class,
+  // and reset topic when class changes
+  useEffect(() => {
+    const classChanged = prevClassRef.current !== selectedClass;
+    prevClassRef.current = selectedClass;
+
+    const isSubjectValidForClass = availableSubjectsForClass.some(
+      (s) => s.id === selectedSubject
+    );
+
+    if (!isSubjectValidForClass) {
+      // Intelligently map tracks if transitioning across primary/middle/secondary boundaries
+      if (selectedSubject === 'science' && (selectedClass === 9 || selectedClass === 10)) {
+        setSelectedSubject('physical_science');
+      } else if (
+        (selectedSubject === 'physical_science' || selectedSubject === 'life_science') &&
+        selectedClass >= 6 &&
+        selectedClass <= 8
+      ) {
+        setSelectedSubject('science');
+      } else if (
+        (selectedSubject === 'physical_science' ||
+          selectedSubject === 'life_science' ||
+          selectedSubject === 'science' ||
+          selectedSubject === 'history' ||
+          selectedSubject === 'geography') &&
+        selectedClass === 5
+      ) {
+        setSelectedSubject('evs');
+      } else if (selectedSubject === 'evs' && selectedClass >= 6 && selectedClass <= 8) {
+        setSelectedSubject('science');
+      } else if (
+        selectedSubject === 'evs' &&
+        (selectedClass === 9 || selectedClass === 10)
+      ) {
+        setSelectedSubject('physical_science');
+      } else {
+        setSelectedSubject(availableSubjectsForClass[0]?.id || 'mathematics');
+      }
+      setSelectedTopic('All Verified Chapters');
+    } else if (classChanged) {
+      // When class changes but subject is retained (e.g. Mathematics), reset chapter to All Verified Chapters
+      setSelectedTopic('All Verified Chapters');
+    }
+  }, [selectedClass, availableSubjectsForClass, selectedSubject]);
+
+  // Reset topic to "All Verified Chapters" when curriculum changes if the topic isn't in that curriculum
   const currentCurriculum = useMemo(
     () => getClassSubjectCurriculum(selectedClass, selectedSubject),
     [selectedClass, selectedSubject]
@@ -2015,7 +2070,7 @@ export default function App() {
                 </div>
 
                 <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-5">
-                  {SUBJECT_LIST.map((sub) => {
+                  {availableSubjectsForClass.map((sub) => {
                     const curr = sub.curriculumByClass[selectedClass];
                     const stats = subjectWiseStats.find((s) => s.subjectId === sub.id);
                     const isSelectedOnDashboard = selectedSubject === sub.id;
@@ -2032,13 +2087,17 @@ export default function App() {
                       >
                         <div className="space-y-2.5">
                           <div className="flex items-center justify-between text-xs text-slate-500">
-                            <span>Class {selectedClass}</span>
+                            <span className="font-semibold text-slate-700">Class {selectedClass}</span>
+                            <span>·</span>
+                            <span className="font-medium text-slate-500">
+                              {curr.chapters.length} {curr.chapters.length === 1 ? 'Chapter' : 'Chapters'}
+                            </span>
                             <span>·</span>
                             <span
                               className={
                                 curr.status === 'prescribed'
-                                  ? 'text-emerald-700 font-medium'
-                                  : 'text-amber-700 font-medium'
+                                  ? 'text-emerald-700 font-semibold'
+                                  : 'text-amber-700 font-semibold'
                               }
                             >
                               {getCurriculumBadgeLabel(curr.status)}
@@ -2370,7 +2429,7 @@ export default function App() {
                       {t(interfaceLanguage, 'selectSubjectPrompt')}
                     </label>
                     <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-2.5">
-                      {SUBJECT_LIST.map((sub) => {
+                      {availableSubjectsForClass.map((sub) => {
                         const isSelected = selectedSubject === sub.id;
                         const subCurr = sub.curriculumByClass[selectedClass];
                         return (
@@ -2387,8 +2446,10 @@ export default function App() {
                             <div className="font-bold text-sm text-slate-900">
                               {sub.name[interfaceLanguage]}
                             </div>
-                            <div className="text-[11px] text-slate-500 mt-0.5">
-                              {getCurriculumBadgeLabel(subCurr.status)}
+                            <div className="text-[11px] text-slate-500 mt-0.5 flex items-center gap-1.5">
+                              <span>{subCurr.chapters.length} {subCurr.chapters.length === 1 ? 'Ch' : 'Chs'}</span>
+                              <span>·</span>
+                              <span>{getCurriculumBadgeLabel(subCurr.status)}</span>
                             </div>
                           </button>
                         );

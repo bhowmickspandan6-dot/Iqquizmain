@@ -1,6 +1,14 @@
 import 'dotenv/config';
 import crypto from 'crypto';
 import { GoogleGenAI, ThinkingLevel, Type } from '@google/genai';
+import {
+  CLASS_LEVELS,
+  CurriculumChapter,
+  getClassCurriculum,
+  getSubjectDefinition,
+  getSubjectsForClass,
+  resolveCurriculumChaptersForQuiz,
+} from '../src/data/curriculum';
 
 // Official supported Gemini Flash models (each model family has independent per-model free-tier quota buckets)
 const SUPPORTED_GEMINI_MODELS = [
@@ -760,6 +768,31 @@ const SUBJECT_SUBTOPIC_POOL: Record<string, string[]> = {
   ],
 };
 
+const SUBJECT_DOMAIN_GUARDRAILS: Record<string, string> = {
+  mathematics:
+    'STRICT DOMAIN GUARDRAIL (MATHEMATICS): Generate ONLY authentic mathematical problems, numerical calculations, algebraic manipulations, geometric proofs/properties, mensuration, trigonometry, coordinate geometry, or statistics strictly from the prescribed WBBPE/WBBSE Mathematics textbook. Every calculation must be 100% verified.',
+  science:
+    'STRICT DOMAIN GUARDRAIL (ENVIRONMENT & SCIENCE — PARIBESH O BIGYAN): Generate ONLY scientific questions (Physics, Chemistry, Biology, Environmental Science) strictly grounded in the prescribed WBBSE Paribesh o Bigyan textbook for this class.',
+  physical_science:
+    'STRICT DOMAIN GUARDRAIL (PHYSICAL SCIENCE — BHOUTO BIGYAN O PARIBESH): Generate ONLY Physics and Chemistry questions (SI units, motion, force, heat, light, sound, electricity, atomic structure, gas laws, periodic table, chemical bonding, metallurgy, organic chemistry) strictly from WBBSE Bhouto Bigyan o Paribesh.',
+  life_science:
+    'STRICT DOMAIN GUARDRAIL (LIFE SCIENCE — JIBAN BIGYAN O PARIBESH): Generate ONLY Biology, physiology, cytology, photosynthesis, respiration, circulation, nervous/endocrine control, cell division, heredity/genetics, evolution, and ecology questions strictly from WBBSE Jiban Bigyan o Paribesh.',
+  history:
+    'STRICT DOMAIN GUARDRAIL (HISTORY — ATIT O AITIHYYA / ITIHAS O PARIBESH): Generate ONLY historical questions (chronology, civilizations, dynasties, rulers, social/religious reforms, peasant/tribal movements, Indian freedom struggle) strictly from the prescribed WBBPE/WBBSE History syllabus.',
+  geography:
+    'STRICT DOMAIN GUARDRAIL (GEOGRAPHY — AMADER PRITHIBI / BHUGOL O PARIBESH): Generate ONLY geographical questions (exogenetic/endogenetic processes, atmosphere, hydrosphere, landforms, climate, soil, rivers, agriculture, industries, maps, West Bengal & India regional geography) strictly from the prescribed WBBPE/WBBSE Geography syllabus.',
+  evs:
+    'STRICT DOMAIN GUARDRAIL (ENVIRONMENTAL STUDIES — AMADER PARIBESH): Generate ONLY Environmental Studies questions covering human body systems, natural environment, biodiversity, landforms & rivers of West Bengal, natural resources, sky/space, and social heritage from WBBPE Amader Paribesh.',
+  english:
+    'STRICT DOMAIN GUARDRAIL (ENGLISH — BUTTERFLY / BLOSSOMS / BLISS & GRAMMAR): Generate ONLY English textbook comprehension questions (prose/poetry authors, characters, plot events, themes, and word meanings from the prescribed WBBPE/WBBSE textbook lesson) and WBBSE functional English grammar/vocabulary questions.',
+  bangla:
+    'STRICT DOMAIN GUARDRAIL (BANGLA — PATABAHAR / SAHITYA MELA / SAHITYA SANCHAYAN & BYAKARAN): Generate ONLY Bengali literature questions (authors, characters, themes, literary context from the prescribed textbook chapters) and Bengali grammar (Bhasha Path / Bangla Byakaran: Dhwani, Sandhi, Karaka, Samasa, Pratyaya, Bakya) questions.',
+  hindi:
+    'STRICT DOMAIN GUARDRAIL (HINDI — FIRST LANGUAGE & VYAKARAN): Generate ONLY Hindi grammar (Vyakaran: Varnamala, Sandhi, Samasa, Karak, Upsarg/Pratyay, Vakya, Alankar) and age-appropriate Hindi literature questions for this class level.',
+  gk:
+    'STRICT DOMAIN GUARDRAIL (GENERAL KNOWLEDGE): Generate ONLY curriculum-aligned General Knowledge questions appropriate for this class level.',
+};
+
 const COGNITIVE_REASONING_ANGLES = [
   'Conceptual Mechanism & Cause-and-Effect Analysis',
   'Multi-Step Quantitative / Numerical Calculation with Fresh Values',
@@ -779,6 +812,12 @@ interface ServerQuestion {
   classLevel: number;
   subject: string;
   topic: string;
+  chapterId?: string;
+  chapterNumber?: number;
+  chapterTitle?: string;
+  textbookName?: string;
+  board?: 'WBBPE' | 'WBBSE';
+  curriculumVerificationStatus?: 'verified' | 'pending_verification';
   difficulty: 'easy' | 'medium' | 'hard';
   language: 'en' | 'bn' | 'hi';
   questionType: 'mcq' | 'tf';
@@ -815,6 +854,10 @@ interface ServerQuizAttempt {
     subject: string;
     quizLanguage: 'en' | 'bn' | 'hi';
     topic: string;
+    chapterId?: string;
+    textbookName?: string;
+    board?: 'WBBPE' | 'WBBSE';
+    curriculumVerificationStatus?: 'verified' | 'pending_verification';
     difficulty: string;
     questionCount: number;
     questionType: string;
@@ -832,6 +875,10 @@ interface ServerQuizAttempt {
   generationInfo: {
     model: string;
     source: 'gemini-ai' | 'verified-curriculum-engine';
+    board?: 'WBBPE' | 'WBBSE';
+    textbookName?: string;
+    syllabusCode?: string;
+    verificationStatus?: 'verified' | 'pending_verification';
     excludedHistoryCount: number;
     uniqueConceptsCount: number;
     notice?: string;
@@ -970,6 +1017,12 @@ function sanitizeAttemptForClient(attempt: ServerQuizAttempt) {
       classLevel: q.classLevel,
       subject: q.subject,
       topic: q.topic,
+      chapterId: q.chapterId,
+      chapterNumber: q.chapterNumber,
+      chapterTitle: q.chapterTitle,
+      textbookName: q.textbookName,
+      board: q.board,
+      curriculumVerificationStatus: q.curriculumVerificationStatus,
       difficulty: q.difficulty,
       language: q.language,
       questionType: q.questionType,
@@ -1081,6 +1134,11 @@ function validateAndNormalizeQuestion(
     quizLanguage: 'en' | 'bn' | 'hi';
     topic: string;
     difficulty: string;
+    board?: 'WBBPE' | 'WBBSE';
+    textbookName?: string;
+    curriculumVerificationStatus?: 'verified' | 'pending_verification';
+    fallbackChapter?: CurriculumChapter;
+    allSubjectChapters?: CurriculumChapter[];
   },
   index: number
 ): ServerQuestion | null {
@@ -1144,10 +1202,10 @@ function validateAndNormalizeQuestion(
     typeof raw.explanation === 'string' && raw.explanation.trim().length > 5
       ? raw.explanation.trim()
       : config.quizLanguage === 'bn'
-      ? `সঠিক উত্তর হলো "${options[correctIndex]}" কারণ এটি পাঠ্যক্রমের তথ্যের সাথে সামঞ্জস্যপূর্ণ।`
+      ? `সঠিক উত্তর হলো "${options[correctIndex]}" কারণ এটি পশ্চিমবঙ্গ বোর্ডের পাঠ্যক্রমের তথ্যের সাথে সামঞ্জস্যপূর্ণ।`
       : config.quizLanguage === 'hi'
-      ? `सही उत्तर "${options[correctIndex]}" है क्योंकि यह पाठ्यक्रम के सिद्धांत के अनुरूप है।`
-      : `The correct answer is "${options[correctIndex]}" based on verified curriculum principles.`;
+      ? `सही उत्तर "${options[correctIndex]}" है क्योंकि यह पश्चिम बंगाल बोर्ड पाठ्यक्रम के सिद्धांत के अनुरूप है।`
+      : `The correct answer is "${options[correctIndex]}" based on verified WBBSE/WBBPE curriculum principles.`;
 
   const cleanText = raw.questionText.trim();
   const fp = computeFingerprint(cleanText);
@@ -1173,6 +1231,41 @@ function validateAndNormalizeQuestion(
       ? 'medium'
       : 'hard';
 
+  // Match returned chapterId or topic back to the structured WBBSE curriculum chapter
+  let matchedChapter: CurriculumChapter | undefined = config.fallbackChapter;
+  if (Array.isArray(config.allSubjectChapters) && config.allSubjectChapters.length > 0) {
+    const rawChapterId = typeof raw.chapterId === 'string' ? raw.chapterId.trim() : '';
+    const rawTopicStr = typeof raw.topic === 'string' ? raw.topic.trim().toLowerCase() : '';
+    if (rawChapterId) {
+      const byId = config.allSubjectChapters.find((c) => c.id === rawChapterId);
+      if (byId) matchedChapter = byId;
+    }
+    if (!matchedChapter && rawTopicStr) {
+      const byTitle = config.allSubjectChapters.find(
+        (c) =>
+          rawTopicStr.includes(c.title.en.toLowerCase()) ||
+          rawTopicStr.includes(c.title.bn.toLowerCase()) ||
+          rawTopicStr.includes(c.title.hi.toLowerCase()) ||
+          c.title.en.toLowerCase().includes(rawTopicStr)
+      );
+      if (byTitle) matchedChapter = byTitle;
+    }
+    if (!matchedChapter) {
+      matchedChapter = config.allSubjectChapters[index % config.allSubjectChapters.length];
+    }
+  }
+
+  const resolvedChapterTitle = matchedChapter
+    ? matchedChapter.title[config.quizLanguage] || matchedChapter.title.en
+    : undefined;
+
+  const resolvedTopic =
+    typeof raw.topic === 'string' &&
+    raw.topic.trim().length > 2 &&
+    raw.topic.trim() !== 'All Verified Chapters'
+      ? raw.topic.trim()
+      : resolvedChapterTitle || config.topic || 'Core Curriculum';
+
   return {
     id: `q_${config.classLevel}_${config.subject}_${fp}_${index}`,
     fingerprint: fp,
@@ -1180,10 +1273,13 @@ function validateAndNormalizeQuestion(
     conceptKey,
     classLevel: config.classLevel,
     subject: config.subject,
-    topic:
-      typeof raw.topic === 'string' && raw.topic.trim().length > 2
-        ? raw.topic.trim()
-        : config.topic || 'Core Curriculum',
+    topic: resolvedTopic,
+    chapterId: matchedChapter?.id,
+    chapterNumber: matchedChapter?.chapterNumber,
+    chapterTitle: resolvedChapterTitle,
+    textbookName: config.textbookName,
+    board: config.board || (config.classLevel === 5 ? 'WBBPE' : 'WBBSE'),
+    curriculumVerificationStatus: config.curriculumVerificationStatus || 'verified',
     difficulty: diff,
     language: config.quizLanguage,
     questionType: qType,
@@ -1199,7 +1295,7 @@ function validateAndNormalizeQuestion(
 }
 
 // ============================================================================
-// DYNAMIC GEMINI QUIZ GENERATION WITH MULTI-PASS DUPLICATE REPLACEMENT
+// DYNAMIC GEMINI QUIZ GENERATION WITH WBBSE/WBBPE CHAPTER COVERAGE & DEDUPLICATION
 // Never returns hardcoded or cached quizzes.
 // ============================================================================
 
@@ -1218,6 +1314,13 @@ async function generateFreshVerifiedQuizQuestions(params: {
   questions: ServerQuestion[];
   modelUsed: string;
   rejectedDuplicatesCount: number;
+  curriculumMeta: {
+    board: 'WBBPE' | 'WBBSE';
+    textbookName: string;
+    syllabusCode: string;
+    verificationStatus: 'verified' | 'pending_verification';
+    chapterId?: string;
+  };
 }> {
   const {
     ai,
@@ -1239,6 +1342,24 @@ async function generateFreshVerifiedQuizQuestions(params: {
       ? 'Hindi (हिन्दी)'
       : 'English';
 
+  // Resolve official WBBPE/WBBSE curriculum context for (classLevel, subject, topic)
+  const curriculumResolution = resolveCurriculumChaptersForQuiz(
+    classLevel as any,
+    subject as any,
+    topic
+  );
+  const curriculumCtx = curriculumResolution.curriculum;
+  const isSingleChapter = !curriculumResolution.isAllChapters;
+  const boardName: 'WBBPE' | 'WBBSE' = classLevel === 5 ? 'WBBPE' : 'WBBSE';
+  const subjectDef = getSubjectDefinition(subject as any);
+  const subjectDisplayName = subjectDef
+    ? `${subjectDef.name.en} (${subjectDef.name[quizLanguage]})`
+    : subject;
+  const localizedTextbookName =
+    curriculumCtx.textbookName[quizLanguage] || curriculumCtx.textbookName.en;
+  const domainGuardrail =
+    SUBJECT_DOMAIN_GUARDRAILS[subject] || SUBJECT_DOMAIN_GUARDRAILS.gk;
+
   // Working comparison store starts with all previously seen questions for this user/class/subject
   const comparisonPool: HistoryComparisonEntry[] = [...existingHistory];
   const workingFingerprints = new Set<string>(excludedFingerprints);
@@ -1251,16 +1372,23 @@ async function generateFreshVerifiedQuizQuestions(params: {
   let resolvedModelName = ACTIVE_GEMINI_MODEL;
   let rejectedDuplicatesCount = 0;
 
-  // Select diverse curriculum subtopics and rotate cognitive angles for this attempt
-  const fullSubtopicPool = SUBJECT_SUBTOPIC_POOL[subject] || SUBJECT_SUBTOPIC_POOL.gk;
   const randomSeedNumber = crypto.randomBytes(4).readUInt32BE(0);
-  const rotatedSubtopics = fullSubtopicPool
-    .map((item, idx) => ({
-      item,
-      score: ((idx * 31 + randomSeedNumber) % 997),
-    }))
-    .sort((a, b) => a.score - b.score)
-    .map((x) => x.item);
+  const activeChapters = curriculumResolution.selectedChapters;
+
+  // Deterministically rotate chapters for even multi-chapter distribution when "All Verified Chapters" is selected
+  const rotatedChapters: CurriculumChapter[] =
+    activeChapters.length > 1
+      ? activeChapters
+          .map((chItem: CurriculumChapter, idx: number) => ({
+            chItem,
+            score: (idx * 37 + randomSeedNumber) % 997,
+          }))
+          .sort((a: { score: number }, b: { score: number }) => a.score - b.score)
+          .map((x: { chItem: CurriculumChapter }) => x.chItem)
+      : activeChapters;
+
+  const fallbackSubtopicPool =
+    SUBJECT_SUBTOPIC_POOL[subject] || SUBJECT_SUBTOPIC_POOL.gk;
 
   for (let pass = 1; pass <= MAX_GENERATION_PASSES; pass++) {
     const remainingNeeded = questionCount - acceptedQuestions.length;
@@ -1288,25 +1416,61 @@ async function generateFreshVerifiedQuizQuestions(params: {
       .map((s, idx) => `${idx + 1}. "${s.slice(0, 105)}"`);
 
     const slotAssignments: string[] = [];
+    const slotChapters: (CurriculumChapter | undefined)[] = [];
+
     for (let s = 0; s < batchRequestCount; s++) {
-      const subtopicChoice =
-        topic && topic !== 'All Verified Chapters'
-          ? `${topic} — Focus Aspect #${((randomSeedNumber + s + pass * 7) % 12) + 1}`
-          : rotatedSubtopics[(s + (pass - 1) * 5) % rotatedSubtopics.length];
       const angleChoice =
-        COGNITIVE_REASONING_ANGLES[(randomSeedNumber + s + pass * 3) % COGNITIVE_REASONING_ANGLES.length];
-      slotAssignments.push(
-        `- Question ${s + 1}: Subtopic Focus = [${subtopicChoice}] | Reasoning Task = [${angleChoice}]`
-      );
+        COGNITIVE_REASONING_ANGLES[
+          (randomSeedNumber + s + pass * 3) % COGNITIVE_REASONING_ANGLES.length
+        ];
+
+      if (rotatedChapters.length > 0) {
+        const assignedChapter: CurriculumChapter = isSingleChapter
+          ? rotatedChapters[0]
+          : rotatedChapters[(s + (pass - 1) * 3) % rotatedChapters.length];
+        slotChapters.push(assignedChapter);
+
+        const concepts = assignedChapter.keyConcepts || [];
+        const conceptFocus =
+          concepts.length > 0
+            ? concepts[(s + (pass - 1) * 2) % concepts.length]
+            : assignedChapter.title.en;
+
+        slotAssignments.push(
+          `- Question ${s + 1}: ChapterId="${assignedChapter.id}" | Chapter="Ch ${assignedChapter.chapterNumber}: ${assignedChapter.title.en} (${assignedChapter.title[quizLanguage]})" | Syllabus Topic Focus="[${conceptFocus}]" | Reasoning Angle="[${angleChoice}]"`
+        );
+      } else {
+        slotChapters.push(undefined);
+        const subtopicChoice =
+          fallbackSubtopicPool[
+            (s + (pass - 1) * 5) % fallbackSubtopicPool.length
+          ];
+        slotAssignments.push(
+          `- Question ${s + 1}: Subtopic Focus="[${subtopicChoice}]" | Reasoning Angle="[${angleChoice}]"`
+        );
+      }
     }
 
-    const systemInstruction = `You are a senior academic curriculum examiner for Classes 5 to 10 (WBBPE/WBBSE & National standard).
+    const systemInstruction = `You are a senior West Bengal Board (${boardName}) academic curriculum examiner for Class ${classLevel}.
+${domainGuardrail}
+
+OFFICIAL CURRICULUM & TEXTBOOK CONTEXT:
+- Board: ${boardName} (${
+      boardName === 'WBBPE'
+        ? 'West Bengal Board of Primary Education'
+        : 'West Bengal Board of Secondary Education'
+    })
+- Class: Class ${classLevel}
+- Academic Subject: ${subjectDisplayName} (subject id: "${subject}")
+- Prescribed Textbook: ${curriculumCtx.textbookName.en} / ${curriculumCtx.textbookName.bn}
+- Syllabus Version: ${curriculumCtx.syllabusVersion} (${curriculumCtx.verificationStatus})
+
 CRITICAL GENERATION RULES:
-1. Subject Independence: The academic subject being tested is "${subject}". The presentation language (Quiz Language) is "${langName}".
-2. Even if the subject is Bangla, English, or Hindi, you MUST write the question stem, options, hint, and explanation strictly in "${langName}" while testing the academic curriculum of "${subject}" for Class ${classLevel}.
-3. Every question must be 100% factually, scientifically, and mathematically accurate for Class ${classLevel}. Double-check all calculations so the option at correctIndex is indisputably right.
-4. ZERO DUPLICATES & HIGH DIVERSITY: Never repeat or paraphrase any previously asked question stem or concept key listed in the prompt. Vary the concepts, scenarios, examples, numerical values, and reasoning tasks across every question.
-5. Keep each explanation concise (1-2 clear sentences) and each hint brief (1 short sentence).
+1. Subject & Chapter Fidelity: Every question MUST strictly test the assigned WBBPE/WBBSE chapter and syllabus topic for "${subjectDisplayName}" in Class ${classLevel}. Never mix subjects (e.g., Mathematics must stay strictly mathematical, History strictly historical, Geography strictly geographical, Physical Science strictly Physics/Chemistry, Life Science strictly Biology).
+2. Presentation Language Independence: Write the questionText, options, hint, and explanation strictly in "${langName}" (language code: "${quizLanguage}"), even when the subject is English, Bangla, or Hindi.
+3. Factual & Mathematical Precision: Every question must be 100% factually, scientifically, and mathematically accurate according to the Class ${classLevel} WBBPE/WBBSE textbook. Double-check all calculations so the option at correctIndex is indisputably right.
+4. ZERO DUPLICATES & HIGH DIVERSITY: Never repeat or paraphrase any previously asked question stem or concept key listed in the prompt.
+5. Keep each explanation concise (1-2 clear sentences referencing the textbook concept) and each hint brief (1 short sentence).
 6. For questionType "${questionType}": if "mcq", provide 4 distinct, plausible options and correctIndex (0-3). If "tf", provide 2 options (True/False in ${langName}) and correctIndex (0 or 1). If "mixed", include a mix of "mcq" and "tf" questions.`;
 
     const exclusionSection =
@@ -1330,12 +1494,19 @@ ${
 
     // Split large question requests into parallel sub-batches so generation completes quickly without timing out
     const chunkLimit = questionCount >= 30 ? 10 : MAX_QUESTIONS_PER_CHUNK;
-    const chunkDescriptors: { count: number; slots: string[]; chunkIndex: number }[] = [];
+    const chunkDescriptors: {
+      count: number;
+      slots: string[];
+      chapters: (CurriculumChapter | undefined)[];
+      chunkIndex: number;
+    }[] = [];
     for (let offset = 0, cIdx = 0; offset < batchRequestCount; offset += chunkLimit, cIdx++) {
       const sliceSlots = slotAssignments.slice(offset, offset + chunkLimit);
+      const sliceChapters = slotChapters.slice(offset, offset + chunkLimit);
       chunkDescriptors.push({
         count: sliceSlots.length,
         slots: sliceSlots,
+        chapters: sliceChapters,
         chunkIndex: cIdx,
       });
     }
@@ -1370,9 +1541,13 @@ ${
             type: Type.STRING,
             description: `Short 1-sentence helpful hint without giving away the answer, in ${langName}`,
           },
+          chapterId: {
+            type: Type.STRING,
+            description: 'Exact ChapterId assigned to this question slot',
+          },
           topic: {
             type: Type.STRING,
-            description: 'Specific chapter or subtopic name',
+            description: `Chapter title or specific syllabus topic in ${langName}`,
           },
           difficulty: {
             type: Type.STRING,
@@ -1403,32 +1578,38 @@ ${
           pass > 1
             ? `[REPLACEMENT GENERATION PASS #${pass}]: Generate ${chunk.count} BRAND-NEW, completely different replacement questions.\n`
             : ''
-        }Generate exactly ${chunk.count} unique, fresh quiz questions for:
-- Class Level: Class ${classLevel}
-- Academic Subject: ${subject}
-- Selected Topic/Chapter: ${topic}
+        }Generate exactly ${chunk.count} unique, fresh WBBPE/WBBSE curriculum quiz questions for:
+- Board & Class: ${boardName} Class ${classLevel}
+- Academic Subject: ${subjectDisplayName}
+- Prescribed Textbook: ${localizedTextbookName}
+- Selected Chapter / Scope: ${
+          isSingleChapter && activeChapters[0]
+            ? `Chapter ${activeChapters[0].chapterNumber}: ${activeChapters[0].title.en} (${activeChapters[0].title[quizLanguage]})`
+            : `All Verified Chapters (${activeChapters.length} chapters in textbook)`
+        }
 - Difficulty Level: ${difficulty}
 - Question Type: ${questionType}
 - Presentation Language: ${langName} (language code: ${quizLanguage})
 - Cryptographic Entropy Seed: ${Date.now()}_${randomSeedNumber}_pass${pass}_chunk${chunk.chunkIndex}
 
-REQUIRED SUBTOPIC & REASONING TASK DIVERSITY PLAN FOR THIS BATCH:
+REQUIRED CHAPTER, TOPIC & REASONING SLOT PLAN FOR THIS BATCH:
 ${chunk.slots.join('\n')}
 ${exclusionSection}`;
 
-        return generateContentWithModelFallback(ai, {
+        const res = await generateContentWithModelFallback(ai, {
           contents: chunkPrompt,
           config: {
             systemInstruction,
-            temperature: pass === 1 ? 0.9 : 0.95,
+            temperature: pass === 1 ? 0.85 : 0.92,
             responseMimeType: 'application/json',
             responseSchema: questionItemSchema,
           },
         });
+        return { ...res, slotChapters: chunk.chapters };
       })
     );
 
-    const candidateArray: any[] = [];
+    const candidateArray: { rawItem: any; assignedChapter?: CurriculumChapter }[] = [];
     let lastChunkError: any = null;
 
     for (const resItem of chunkResults) {
@@ -1442,7 +1623,12 @@ ${exclusionSection}`;
           : Array.isArray(parsed?.items)
           ? parsed.items
           : [];
-        candidateArray.push(...items);
+        items.forEach((rawItem: any, idx: number) => {
+          candidateArray.push({
+            rawItem,
+            assignedChapter: resItem.value.slotChapters[idx],
+          });
+        });
       } else {
         lastChunkError = resItem.reason;
       }
@@ -1452,7 +1638,7 @@ ${exclusionSection}`;
       throw lastChunkError;
     }
 
-    for (const rawItem of candidateArray) {
+    for (const { rawItem, assignedChapter } of candidateArray) {
       if (acceptedQuestions.length >= questionCount) break;
 
       const normalized = validateAndNormalizeQuestion(
@@ -1463,6 +1649,11 @@ ${exclusionSection}`;
           quizLanguage,
           topic,
           difficulty,
+          board: boardName,
+          textbookName: localizedTextbookName,
+          curriculumVerificationStatus: curriculumCtx.verificationStatus,
+          fallbackChapter: assignedChapter,
+          allSubjectChapters: activeChapters,
         },
         acceptedQuestions.length
       );
@@ -1480,8 +1671,6 @@ ${exclusionSection}`;
         rejectedStemsThisRun.push(
           `${normalized.questionText.slice(0, 90)} [reason: ${simCheck.reason}]`
         );
-        // On the final pass only, if we still need questions to complete the requested count
-        // and the question is not an exact fingerprint duplicate, accept it rather than failing the whole quiz
         if (
           pass === MAX_GENERATION_PASSES &&
           !workingFingerprints.has(normalized.fingerprint) &&
@@ -1505,7 +1694,6 @@ ${exclusionSection}`;
         continue;
       }
 
-      // Unique & verified! Add to working sets and accepted list
       workingFingerprints.add(normalized.fingerprint);
       comparisonPool.push({
         fingerprint: normalized.fingerprint,
@@ -1530,6 +1718,16 @@ ${exclusionSection}`;
     questions: acceptedQuestions,
     modelUsed: resolvedModelName,
     rejectedDuplicatesCount,
+    curriculumMeta: {
+      board: boardName,
+      textbookName: localizedTextbookName,
+      syllabusCode: curriculumCtx.syllabusVersion,
+      verificationStatus: curriculumCtx.verificationStatus,
+      chapterId:
+        isSingleChapter && activeChapters[0]
+          ? activeChapters[0].id
+          : undefined,
+    },
   };
 }
 
@@ -1562,7 +1760,44 @@ export default async function handler(req: any, res: any) {
       return;
     }
 
-    // 2. Generate Unique Quiz Endpoint (Dynamic Gemini AI + Multi-Layer Deduplication)
+    // 1b. Official WBBPE/WBBSE Curriculum Database Inspection Endpoint
+    if (method === 'GET' && routePath === '/api/curriculum') {
+      const summary = CLASS_LEVELS.map((cls) => {
+        const subjects = getSubjectsForClass(cls);
+        const board: 'WBBPE' | 'WBBSE' = cls === 5 ? 'WBBPE' : 'WBBSE';
+        return {
+          classLevel: cls,
+          board,
+          subjects: subjects.map((sub) => {
+            const curr = getClassCurriculum(cls, sub.id);
+            return {
+              subjectId: sub.id,
+              name: sub.name,
+              board,
+              textbookName: curr.textbookName,
+              syllabusVersion: curr.syllabusVersion,
+              verificationStatus: curr.verificationStatus,
+              officialSource: curr.officialSource,
+              chapterCount: curr.chapters.length,
+              chapters: curr.chapters.map((ch: CurriculumChapter) => ({
+                id: ch.id,
+                chapterNumber: ch.chapterNumber,
+                title: ch.title,
+                topicsCount: ch.keyConcepts.length,
+                topics: ch.keyConcepts,
+              })),
+            };
+          }),
+        };
+      });
+      sendJson(res, 200, {
+        curriculumBoard: 'WBBPE (Class 5) & WBBSE (Classes 6–10)',
+        classes: summary,
+      });
+      return;
+    }
+
+    // 2. Generate Unique Quiz Endpoint (Dynamic Gemini AI + WBBSE Curriculum + Multi-Layer Deduplication)
     if (method === 'POST' && routePath === '/api/quiz/generate') {
       const body = await readJsonBody(req);
       const {
@@ -1663,7 +1898,7 @@ export default async function handler(req: any, res: any) {
         const resolvedDifficulty =
           normalizedMode === 'challenge' ? 'hard' : String(difficulty || 'mixed');
 
-        const { questions, modelUsed, rejectedDuplicatesCount } =
+        const { questions, modelUsed, rejectedDuplicatesCount, curriculumMeta } =
           await generateFreshVerifiedQuizQuestions({
             ai,
             classLevel: validClass,
@@ -1703,6 +1938,10 @@ export default async function handler(req: any, res: any) {
             subject: String(subject),
             quizLanguage: validQuizLang,
             topic: String(topic),
+            chapterId: curriculumMeta.chapterId,
+            textbookName: curriculumMeta.textbookName,
+            board: curriculumMeta.board,
+            curriculumVerificationStatus: curriculumMeta.verificationStatus,
             difficulty: resolvedDifficulty,
             questionCount: questions.length,
             questionType: String(questionType),
@@ -1718,6 +1957,10 @@ export default async function handler(req: any, res: any) {
           generationInfo: {
             model: modelUsed,
             source: 'gemini-ai',
+            board: curriculumMeta.board,
+            textbookName: curriculumMeta.textbookName,
+            syllabusCode: curriculumMeta.syllabusCode,
+            verificationStatus: curriculumMeta.verificationStatus,
             excludedHistoryCount: excludedFingerprintsSet.size,
             uniqueConceptsCount: questions.length,
             notice:
@@ -1729,7 +1972,7 @@ export default async function handler(req: any, res: any) {
 
         serverAttempts.set(attemptId, attempt);
         console.info(
-          `[IQ Quiz Server] Fresh quiz generated | attemptId=${attemptId} | model=${modelUsed} | class=${validClass} | subject=${subject} | lang=${validQuizLang} | excludedHistory=${excludedFingerprintsSet.size} | rejectedSimilar=${rejectedDuplicatesCount}`
+          `[IQ Quiz Server] Fresh WBBSE quiz generated | attemptId=${attemptId} | model=${modelUsed} | board=${curriculumMeta.board} | class=${validClass} | subject=${subject} | textbook="${curriculumMeta.textbookName}" | lang=${validQuizLang} | excludedHistory=${excludedFingerprintsSet.size} | rejectedSimilar=${rejectedDuplicatesCount}`
         );
         sendJson(res, 200, sanitizeAttemptForClient(attempt));
         return;
@@ -2043,7 +2286,7 @@ export default async function handler(req: any, res: any) {
             ? 'hard'
             : String(baseConfig.difficulty || 'mixed');
 
-        const { questions: retakeQuestions, modelUsed } =
+        const { questions: retakeQuestions, modelUsed, curriculumMeta } =
           await generateFreshVerifiedQuizQuestions({
             ai,
             classLevel: validClass,
@@ -2081,6 +2324,10 @@ export default async function handler(req: any, res: any) {
             ...baseConfig,
             classLevel: validClass,
             quizLanguage: targetLang,
+            chapterId: curriculumMeta.chapterId,
+            textbookName: curriculumMeta.textbookName,
+            board: curriculumMeta.board,
+            curriculumVerificationStatus: curriculumMeta.verificationStatus,
             difficulty: resolvedDifficulty,
             questionCount: retakeQuestions.length,
             durationMinutes: resolvedDuration,
@@ -2095,6 +2342,10 @@ export default async function handler(req: any, res: any) {
           generationInfo: {
             model: modelUsed,
             source: 'gemini-ai',
+            board: curriculumMeta.board,
+            textbookName: curriculumMeta.textbookName,
+            syllabusCode: curriculumMeta.syllabusCode,
+            verificationStatus: curriculumMeta.verificationStatus,
             excludedHistoryCount: excludedFingerprintsSet.size,
             uniqueConceptsCount: retakeQuestions.length,
             notice: `Fresh Retake of Attempt ${baseAttemptId.slice(-6)} in ${targetLang.toUpperCase()} — Brand-new questions generated.`,
