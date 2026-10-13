@@ -13,7 +13,7 @@ import {
 } from 'lucide-react';
 import { LanguageCode, QuizAttemptState, normalizeQuizMode } from '../types';
 import { t, LANGUAGE_LABELS } from '../i18n/translations';
-import { getSubjectDefinition } from '../data/curriculum';
+import { getSubjectDefinition, formatTopicForDisplay } from '../data/curriculum';
 
 interface ResultsViewProps {
   attempt: QuizAttemptState;
@@ -222,7 +222,11 @@ export const ResultsView: React.FC<ResultsViewProps> = ({
                   {summary.topicBreakdown.map((tb, i) => (
                     <tr key={i} className="hover:bg-slate-50/80">
                       <td className="py-2.5 px-4 font-medium text-slate-900">
-                        {tb.topic}
+                        {formatTopicForDisplay(
+                          tb.topic,
+                          attempt.config.subject,
+                          attempt.config.classLevel
+                        )}
                       </td>
                       <td className="py-2.5 px-4 text-right font-mono tabular-nums text-slate-700">
                         {tb.total}

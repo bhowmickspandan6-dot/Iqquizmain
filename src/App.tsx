@@ -52,6 +52,8 @@ import {
   getClassSubjectCurriculum,
   getSubjectDefinition,
   getSubjectsForClass,
+  getChapterDisplayName,
+  formatTopicForDisplay,
 } from './data/curriculum';
 import { LANGUAGE_LABELS, t } from './i18n/translations';
 import { ActiveQuizView } from './components/ActiveQuizView';
@@ -2271,7 +2273,7 @@ export default function App() {
                           >
                             <div className="min-w-0">
                               <div className="text-sm font-semibold text-slate-900 truncate">
-                                {wt.topic}
+                                {formatTopicForDisplay(wt.topic, wt.subject, wt.classLevel)}
                               </div>
                               <div className="text-xs text-slate-500 tabular-nums">
                                 Class {wt.classLevel} · {subDef.name[interfaceLanguage]} ·
@@ -2480,11 +2482,11 @@ export default function App() {
                       className="w-full px-3.5 py-2.5 rounded-lg border border-slate-300 bg-white text-sm text-slate-900 font-medium"
                     >
                       <option value="All Verified Chapters">
-                        {t(interfaceLanguage, 'allChaptersOption')}
+                        {formatTopicForDisplay('All Verified Chapters', selectedSubject, selectedClass)}
                       </option>
                       {currentCurriculum.chapters.map((ch) => (
                         <option key={ch.id} value={ch.title.en}>
-                          {ch.title[interfaceLanguage]}
+                          {getChapterDisplayName(ch, selectedSubject)}
                         </option>
                       ))}
                     </select>
@@ -2853,7 +2855,7 @@ export default function App() {
                                   {subDef.name[interfaceLanguage]}
                                 </div>
                                 <div className="text-xs text-slate-500 truncate max-w-xs">
-                                  {att.config.topic}
+                                  {formatTopicForDisplay(att.config.topic, att.config.subject, att.config.classLevel)}
                                 </div>
                               </td>
                               <td className="py-3 px-4 text-xs font-semibold text-indigo-700">

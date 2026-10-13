@@ -186,3 +186,58 @@ export function resolveCurriculumChaptersForQuiz(
     isAllChapters: true,
   };
 }
+
+/**
+ * Formats a chapter title for user interface display:
+ * - For Hindi subject ('hindi' or 'hindi_subject'), displays Hindi (hi) chapter title.
+ * - For all other subjects across all classes (5–10), displays Bengali (bn) chapter title.
+ */
+export function getChapterDisplayName(
+  chapter: CurriculumChapter,
+  subjectId?: SubjectId
+): string {
+  if (subjectId === 'hindi' || subjectId === 'hindi_subject') {
+    return chapter.title.hi || chapter.title.bn || chapter.title.en;
+  }
+  return chapter.title.bn || chapter.title.en;
+}
+
+/**
+ * Formats a topic/chapter string for user display.
+ * If the topic represents a specific chapter from curriculum, it displays in Bengali (or Hindi for Hindi subject).
+ */
+export function formatTopicForDisplay(
+  topic: string,
+  subjectId?: SubjectId,
+  classLevel?: ClassLevel
+): string {
+  const trimmed = (topic || '').trim();
+  if (
+    !trimmed ||
+    trimmed === 'All Verified Chapters' ||
+    trimmed.toLowerCase().includes('all verified') ||
+    trimmed.toLowerCase().includes('all chapters')
+  ) {
+    if (subjectId === 'hindi' || subjectId === 'hindi_subject') {
+      return 'सभी सत्यापित अध्याय (All Verified Chapters)';
+    }
+    return 'সকল যাচাইকৃত অধ্যায় (All Verified Chapters)';
+  }
+
+  if (subjectId && classLevel) {
+    const curr = getClassSubjectCurriculum(classLevel, subjectId);
+    const matched = curr.chapters.find(
+      (c) =>
+        c.title.en.toLowerCase() === trimmed.toLowerCase() ||
+        c.id === trimmed ||
+        c.title.bn === trimmed ||
+        c.title.hi === trimmed
+    );
+    if (matched) {
+      return getChapterDisplayName(matched, subjectId);
+    }
+  }
+
+  return trimmed;
+}
+

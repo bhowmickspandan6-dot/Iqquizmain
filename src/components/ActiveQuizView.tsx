@@ -20,7 +20,7 @@ import {
   normalizeQuizMode,
 } from '../types';
 import { t, LANGUAGE_LABELS } from '../i18n/translations';
-import { getSubjectDefinition } from '../data/curriculum';
+import { getSubjectDefinition, formatTopicForDisplay } from '../data/curriculum';
 import {
   getOrInitAttemptTimer,
   computeTimerSnapshot,
@@ -264,7 +264,11 @@ export const ActiveQuizView: React.FC<ActiveQuizViewProps> = ({
               </span>
             </div>
             <h2 className="text-base sm:text-lg font-bold text-slate-900 mt-1 truncate">
-              {attempt.config.topic}
+              {formatTopicForDisplay(
+                attempt.config.topic,
+                attempt.config.subject,
+                attempt.config.classLevel
+              )}
             </h2>
           </div>
 
