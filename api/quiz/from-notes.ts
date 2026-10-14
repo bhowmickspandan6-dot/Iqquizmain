@@ -1,4 +1,4 @@
-import handler from '../index.js';
+import handler from '../index.ts';
 
 export default async function (req: any, res: any) {
   req.url = '/api/quiz/from-notes';

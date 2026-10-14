@@ -8,33 +8,52 @@ import {
   getSubjectDefinition,
   getSubjectsForClass,
   resolveCurriculumChaptersForQuiz,
-} from '../src/data/curriculum';
+} from '../src/data/curriculum.ts';
 
-// Official supported Gemini Flash models (each model family has independent per-model free-tier quota buckets)
+// Official supported Gemini models: fast, low-latency, and free-tier eligible
 const SUPPORTED_GEMINI_MODELS = [
-  'gemini-3-flash-preview',
-  'gemini-2.5-flash',
-  'gemini-2.5-flash-lite',
   'gemini-flash-lite-latest',
-  'gemini-3.1-flash-lite-preview',
   'gemini-3.1-flash-lite',
-  'gemini-flash-latest',
+  'gemini-3.5-flash-lite',
   'gemini-3.8-flash',
+  'gemini-flash-latest',
+  'gemini-3.5-flash',
 ];
 const configuredModel = (process.env.GEMINI_MODEL || '').trim();
 const ACTIVE_GEMINI_MODEL = SUPPORTED_GEMINI_MODELS.includes(configuredModel)
   ? configuredModel
-  : 'gemini-3-flash-preview';
+  : 'gemini-flash-lite-latest';
 
-// Track per-model quota exhaustion or unavailability so subsequent requests immediately skip exhausted models
+// Track per-model quota exhaustion, demand spikes, or unavailability so subsequent requests immediately skip failing models
 const modelCooldownUntil = new Map<string, number>();
 
 function recordModelFailureCooldown(modelName: string, err: any): void {
   const msg = String(err?.message || err || '').toLowerCase();
   const now = Date.now();
 
-  if (msg.includes('404') || msg.includes('not found') || msg.includes('not supported')) {
-    modelCooldownUntil.set(modelName, now + 60 * 60 * 1000);
+  if (
+    msg.includes('404') ||
+    msg.includes('not found') ||
+    msg.includes('not supported') ||
+    msg.includes('no longer available')
+  ) {
+    modelCooldownUntil.set(modelName, now + 24 * 60 * 60 * 1000);
+    return;
+  }
+
+  if (
+    msg.includes('503') ||
+    msg.includes('high demand') ||
+    msg.includes('unavailable') ||
+    msg.includes('service unavailable')
+  ) {
+    // 503 demand spikes: cool down for 2 minutes so other candidate models respond immediately
+    const cooldownMs = 2 * 60 * 1000;
+    modelCooldownUntil.set(modelName, now + cooldownMs);
+    if (modelName === 'gemini-3.8-flash' || modelName === 'gemini-flash-latest') {
+      modelCooldownUntil.set('gemini-3.8-flash', now + cooldownMs);
+      modelCooldownUntil.set('gemini-flash-latest', now + cooldownMs);
+    }
     return;
   }
 
@@ -51,8 +70,7 @@ function recordModelFailureCooldown(modelName: string, err: any): void {
     const cooldownMs = isDailyQuota ? 30 * 60 * 1000 : 45 * 1000;
     modelCooldownUntil.set(modelName, now + cooldownMs);
 
-    // If an alias like gemini-flash-latest resolved to gemini-3.8-flash, cool down both
-    if (msg.includes('gemini-3.8-flash')) {
+    if (modelName === 'gemini-3.8-flash' || modelName === 'gemini-flash-latest') {
       modelCooldownUntil.set('gemini-3.8-flash', now + cooldownMs);
       modelCooldownUntil.set('gemini-flash-latest', now + cooldownMs);
     }
@@ -78,7 +96,7 @@ function getOrderedCandidateModels(): string[] {
 }
 
 // Per-call timeout and bounded replacement passes so serverless functions never hang or loop infinitely
-const GEMINI_TIMEOUT_MS = 25000;
+const GEMINI_TIMEOUT_MS = 14000;
 const MAX_GENERATION_PASSES = 3;
 const MAX_QUESTIONS_PER_CHUNK = 7;
 
@@ -210,15 +228,14 @@ async function generateContentWithModelFallback(
   for (let i = 0; i < candidateModels.length; i++) {
     const modelName = candidateModels[i];
     try {
-      // Configure low-latency thinking per model family so structured JSON generation completes in ~2-4s
-      const thinkingConfig =
-        modelName === 'gemini-3-flash-preview' || modelName === 'gemini-3.8-flash'
-          ? { thinkingLevel: ThinkingLevel.LOW }
-          : modelName.startsWith('gemini-2.5') ||
-            modelName === 'gemini-flash-latest' ||
-            modelName === 'gemini-flash-lite-latest'
-          ? { thinkingBudget: 0 }
-          : undefined;
+      // Configure low-latency thinking so structured JSON generation completes in ~1-2s
+      const isLowLatencyThinking =
+        modelName.includes('3') ||
+        modelName.includes('flash-latest') ||
+        modelName.includes('flash-lite');
+      const thinkingConfig = isLowLatencyThinking
+        ? { thinkingLevel: ThinkingLevel.LOW }
+        : undefined;
 
       const mergedConfig = {
         ...(params.config || {}),
@@ -298,14 +315,21 @@ function parseGeminiJsonSafe(rawText: string | undefined): any {
 function sendJson(res: any, statusCode: number, payload: any) {
   const body = JSON.stringify(payload);
   res.statusCode = statusCode;
+  if (typeof res.status === 'function') {
+    try {
+      res.status(statusCode);
+    } catch {
+      // ignore
+    }
+  }
   if (typeof res.setHeader === 'function') {
     res.setHeader('Content-Type', 'application/json; charset=utf-8');
     res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate');
   }
-  if (typeof res.end === 'function') {
+  if (typeof res.json === 'function') {
+    res.json(payload);
+  } else if (typeof res.end === 'function') {
     res.end(body);
-  } else if (typeof res.json === 'function') {
-    res.status(statusCode).json(payload);
   }
 }
 
@@ -1828,14 +1852,40 @@ export default async function handler(req: any, res: any) {
         return;
       }
 
-      const validCount = [5, 10, 15, 20, 30, 50].includes(Number(questionCount))
-        ? Number(questionCount)
-        : 5;
-      const validClass = [5, 6, 7, 8, 9, 10].includes(Number(classLevel))
-        ? Number(classLevel)
-        : 8;
-      const validQuizLang: 'en' | 'bn' | 'hi' =
-        quizLanguage === 'bn' || quizLanguage === 'hi' ? quizLanguage : 'en';
+      const numClass = Number(classLevel);
+      if (![5, 6, 7, 8, 9, 10].includes(numClass)) {
+        sendJson(res, 400, {
+          error: `Invalid class level (${classLevel}). Supported classes are 5, 6, 7, 8, 9, and 10.`,
+        });
+        return;
+      }
+      const validClass = numClass as 5 | 6 | 7 | 8 | 9 | 10;
+
+      const classSubjects = getSubjectsForClass(validClass);
+      const isSubjectValid = classSubjects.some((s) => s.id === subject);
+      if (!isSubjectValid) {
+        sendJson(res, 400, {
+          error: `Subject "${subject}" is not applicable for Class ${validClass}. Please select a valid subject for this class.`,
+        });
+        return;
+      }
+
+      if (quizLanguage !== 'en' && quizLanguage !== 'bn' && quizLanguage !== 'hi') {
+        sendJson(res, 400, {
+          error: `Invalid quiz language "${quizLanguage}". Supported languages are English (en), Bengali (bn), and Hindi (hi).`,
+        });
+        return;
+      }
+      const validQuizLang: 'en' | 'bn' | 'hi' = quizLanguage;
+
+      const numCount = Number(questionCount);
+      if (![5, 10, 15, 20, 30, 50].includes(numCount)) {
+        sendJson(res, 400, {
+          error: `Invalid question count (${questionCount}). Supported counts are 5, 10, 15, 20, 30, or 50.`,
+        });
+        return;
+      }
+      const validCount = numCount;
       const cleanUserId = String(userId || 'local_student');
 
       // Merge server-side history with persistent client history (from Firestore + localStorage)
@@ -1984,16 +2034,30 @@ export default async function handler(req: any, res: any) {
         });
         const msg = String(aiErr?.message || aiErr || '').toLowerCase();
         if (msg.includes('api_key_invalid') || msg.includes('api key not valid') || msg.includes('invalid api key')) {
-          sendJson(res, 503, {
+          sendJson(res, 401, {
             error:
-              'The configured GEMINI_API_KEY on the server was rejected by Google Gemini API. Please verify your GEMINI_API_KEY in Vercel Project Settings → Environment Variables and redeploy.',
+              'The configured GEMINI_API_KEY on the server was rejected by Google Gemini API. Please verify your GEMINI_API_KEY in Project Settings → Environment Variables.',
           });
           return;
         }
         if (msg.includes('429') || msg.includes('resource_exhausted') || msg.includes('quota')) {
           sendJson(res, 429, {
             error:
-              'Gemini AI rate limit or quota reached. Please wait a few seconds and click Retry Quiz Generation.',
+              'Gemini AI rate limit or quota exceeded. Please wait a few seconds and click Retry Quiz Generation.',
+          });
+          return;
+        }
+        if (msg.includes('503') || msg.includes('high demand') || msg.includes('unavailable')) {
+          sendJson(res, 503, {
+            error:
+              'Gemini AI is currently experiencing high temporary demand. Please click Retry Quiz Generation to try again.',
+          });
+          return;
+        }
+        if (msg.includes('timed out') || msg.includes('timeout')) {
+          sendJson(res, 504, {
+            error:
+              'Gemini AI request timed out. Please click Retry Quiz Generation to try again.',
           });
           return;
         }
@@ -2362,6 +2426,13 @@ export default async function handler(req: any, res: any) {
           sendJson(res, 429, {
             error:
               'Gemini AI rate limit reached. Please wait a few seconds and click Retry Quiz Generation.',
+          });
+          return;
+        }
+        if (msg.includes('503') || msg.includes('high demand') || msg.includes('unavailable')) {
+          sendJson(res, 503, {
+            error:
+              'Gemini AI is currently experiencing high temporary demand. Please click Retry to generate fresh retake questions.',
           });
           return;
         }

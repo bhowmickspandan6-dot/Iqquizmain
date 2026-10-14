@@ -58,7 +58,7 @@ export async function safeFetchJson<T = any>(
     }
     if (response.status >= 500) {
       throw new Error(
-        `The server encountered an error (HTTP ${response.status}) while generating your quiz. Please click Retry.`
+        `A temporary server error occurred while connecting to the quiz service (HTTP ${response.status}). Please click Retry Quiz Generation to generate fresh questions.`
       );
     }
     const preview = trimmed.replace(/<[^>]*>/g, ' ').replace(/\s+/g, ' ').slice(0, 120);
@@ -85,7 +85,7 @@ export async function safeFetchJson<T = any>(
         ? parsed.error.message.trim()
         : '';
 
-    const serverErrorMsg =
+    let serverErrorMsg =
       typeof parsed?.error === 'string' && parsed.error.trim().length > 0
         ? parsed.error.trim()
         : nestedErrorMsg.length > 0
@@ -93,6 +93,16 @@ export async function safeFetchJson<T = any>(
         : typeof parsed?.message === 'string' && parsed.message.trim().length > 0
         ? parsed.message.trim()
         : `Request failed with HTTP status ${response.status}.`;
+
+    if (
+      serverErrorMsg === 'A server error has occurred' ||
+      serverErrorMsg.toLowerCase().includes('server error has occurred') ||
+      serverErrorMsg.toLowerCase().includes('an unexpected server error')
+    ) {
+      serverErrorMsg =
+        'A temporary server error occurred while connecting to the AI quiz service. Please click Retry Quiz Generation.';
+    }
+
     throw new Error(serverErrorMsg);
   }
 
