@@ -24,6 +24,9 @@ import {
   RefreshCw,
   Shuffle,
   MessageSquare,
+  SlidersHorizontal,
+  BookOpen,
+  Play,
 } from 'lucide-react';
 import {
   ChatConversation,
@@ -64,6 +67,7 @@ import {
   QuizLanguageModal,
   PendingQuizLaunch,
 } from './components/QuizLanguageModal';
+import { ConfigureChapterModal } from './components/ConfigureChapterModal';
 import {
   auth,
   onAuthStateChanged,
@@ -101,6 +105,7 @@ const STORAGE_KEYS = {
   CLIENT_UID: 'iqquiz_client_uid_v1',
   NOTES: 'eduquiz_notes_v1',
   CHATS_PREFIX: 'iqquiz_chats_v1_',
+  CONFIGURED_CHAPTERS: 'eduquiz_configured_chapters_v1',
 };
 
 interface PendingLaunchInternal extends PendingQuizLaunch {
@@ -224,6 +229,19 @@ export default function App() {
   const [quizGenError, setQuizGenError] = useState<string | null>(null);
   const quizGenInFlightRef = useRef(false);
   const [settingsSavedBanner, setSettingsSavedBanner] = useState(false);
+
+  // Per (Class, Subject) Configured Chapter preferences (Configure Quiz feature)
+  // Ensures selections for one class/subject never overwrite another
+  const [configuredChapters, setConfiguredChapters] = useState<Record<string, string>>(() => {
+    try {
+      const raw = localStorage.getItem(STORAGE_KEYS.CONFIGURED_CHAPTERS);
+      return raw ? JSON.parse(raw) : {};
+    } catch {
+      return {};
+    }
+  });
+  const [configureModalSubject, setConfigureModalSubject] = useState<SubjectId | null>(null);
+  const [saveToast, setSaveToast] = useState<{ message: string; subName: string } | null>(null);
 
   const effectiveUserId = currentUser?.uid || clientUid;
   const userChatStorageKey = `${STORAGE_KEYS.CHATS_PREFIX}${effectiveUserId}`;
@@ -754,6 +772,8 @@ export default function App() {
 
   // MANDATORY PRE-QUIZ MODE & LANGUAGE GATE:
   // Opens the Quiz Mode & Language Selection Modal before EVERY new quiz attempt, subject quiz, practice test, random quiz, or retake.
+  // MANDATORY PRE-QUIZ MODE & LANGUAGE GATE:
+  // Opens the Quiz Mode & Language Selection Modal before EVERY new quiz attempt, subject quiz, practice test, random quiz, or retake.
   const requestQuizWithLanguageModal = (
     overrideConfig?: Partial<QuizConfig>,
     kind: 'standard' | 'random' | 'retake' | 'notes' = 'standard',
@@ -761,6 +781,10 @@ export default function App() {
       originalAttemptId?: string;
       noteMcqs?: StudyNoteAnalysis['mcqs'];
       skipSubjectStep?: boolean;
+      skipClassStep?: boolean;
+      skipChapterStep?: boolean;
+      showChapterStep?: boolean;
+      flowType?: 'start_quiz' | 'configure_card' | 'quick_practice' | 'random' | 'retake' | 'notes';
     }
   ) => {
     if (generatingQuiz || quizGenInFlightRef.current) return;
@@ -788,7 +812,107 @@ export default function App() {
       originalAttemptId: extra?.originalAttemptId,
       noteMcqs: extra?.noteMcqs,
       skipSubjectStep: Boolean(extra?.skipSubjectStep),
+      skipClassStep: Boolean(extra?.skipClassStep),
+      showChapterStep: Boolean(extra?.showChapterStep),
+      flowType: extra?.flowType,
     });
+  };
+
+  // 1. Primary Start Quiz flow (The ONLY place with Subject Selection):
+  // 1. Select Class -> 2. Select Quiz Mode -> 3. Select Quiz Language -> 4. Select Subject -> 5. Select Chapter -> 6. Generate and start quiz
+  const handleStartQuizFlow = () => {
+    requestQuizWithLanguageModal(
+      {
+        classLevel: selectedClass,
+        subject: selectedSubject,
+        topic: selectedTopic || 'All Verified Chapters',
+        difficulty: 'mixed',
+        questionCount: 5,
+        questionType: 'mcq',
+        durationMinutes: 3,
+        mode: 'practice',
+      },
+      'standard',
+      {
+        flowType: 'start_quiz',
+      }
+    );
+  };
+
+  // Helper: Retrieve the configured chapter for a specific (class, subject) pair
+  const getConfiguredChapter = (cls: ClassLevel, sub: SubjectId): string => {
+    return configuredChapters[`${cls}_${sub}`] || 'All Verified Chapters';
+  };
+
+  // Helper: Save configured chapter for a specific (class, subject) pair
+  // Strictly preserves independent settings across subjects and classes
+  const handleSaveConfiguredChapter = (cls: ClassLevel, sub: SubjectId, chapter: string) => {
+    const key = `${cls}_${sub}`;
+    setConfiguredChapters((prev) => {
+      const next = { ...prev, [key]: chapter };
+      try {
+        localStorage.setItem(STORAGE_KEYS.CONFIGURED_CHAPTERS, JSON.stringify(next));
+      } catch {
+        // ignore storage quota
+      }
+      return next;
+    });
+
+    // Also sync current active topic if it matches currently selected subject and class
+    if (selectedClass === cls && selectedSubject === sub) {
+      setSelectedTopic(chapter);
+    }
+
+    const subDef = getSubjectDefinition(sub);
+    setSaveToast({
+      message: t(interfaceLanguage, 'selectionSavedToast'),
+      subName: subDef.name[interfaceLanguage],
+    });
+    setTimeout(() => {
+      setSaveToast(null);
+    }, 3500);
+  };
+
+  // 2. Dashboard Configure Quiz flow (Chapter Selection Only):
+  // When user clicks Configure Quiz on ANY subject card:
+  // - Open Chapter Selection screen directly
+  // - Automatically use class and subject belonging to clicked card
+  // - Show only verified chapters belonging to that class and subject
+  // - Allow user to select one chapter or All Chapters
+  // - Save the selected chapter as configuration for that subject and class
+  // - Provide Save Selection button
+  // - Return to Dashboard without starting a quiz
+  // CRITICAL: NEVER generate questions, start a timer, or start a quiz!
+  const handleConfigureSubjectCard = (targetSubject: SubjectId) => {
+    setSelectedSubject(targetSubject);
+    setConfigureModalSubject(targetSubject);
+  };
+
+  // 3. Dashboard Quick 5-Q Practice:
+  // Subject is automatically selected from card -> NEVER show Subject Selection -> Mode -> Language -> Generate exactly 5 questions
+  // Uses the configured chapter preference for this subject and class
+  const handleQuickPracticeSubjectCard = (targetSubject: SubjectId) => {
+    setSelectedSubject(targetSubject);
+    const configuredTopic = getConfiguredChapter(selectedClass, targetSubject);
+    requestQuizWithLanguageModal(
+      {
+        classLevel: selectedClass,
+        subject: targetSubject,
+        topic: configuredTopic || 'All Verified Chapters',
+        difficulty: 'mixed',
+        questionCount: 5,
+        questionType: 'mcq',
+        durationMinutes: 0,
+        mode: 'practice',
+      },
+      'standard',
+      {
+        skipClassStep: true,
+        skipSubjectStep: true,
+        showChapterStep: false,
+        flowType: 'quick_practice',
+      }
+    );
   };
 
   // Trigger a Random Quiz for the currently selected class:
@@ -820,52 +944,47 @@ export default function App() {
         durationMinutes: 3,
         mode: 'timed',
       },
-      'random'
-    );
-  };
-
-  // Launch Quick 5-Q Practice from a Dashboard subject card:
-  // Step 1: Select Quiz Mode -> Step 2: Select Quiz Language -> Step 3: Generate 5-Q Quiz for the clicked card's subject & class (no Subject Selection step)
-  const handleQuickPracticeSubjectCard = (targetSubject: SubjectId) => {
-    setSelectedSubject(targetSubject);
-    requestQuizWithLanguageModal(
-      {
-        classLevel: selectedClass,
-        subject: targetSubject,
-        topic: 'All Verified Chapters',
-        difficulty: 'mixed',
-        questionCount: 5,
-        questionType: 'mcq',
-        durationMinutes: 0,
-        mode: 'practice',
-      },
-      'standard',
-      { skipSubjectStep: true }
+      'random',
+      { flowType: 'random' }
     );
   };
 
   // Execute Quiz Generation ONLY after the student explicitly selects a Quiz Mode (Step 1) + Language (Step 2) + Subject (Step 3) & clicks Start Quiz (Step 4)
   // CRITICAL: Do not generate questions or start the timer until the user clicks "Start Quiz"!
+  // Execute Quiz Generation after user confirms selections in the Quiz Modal
   const handleConfirmLanguageAndGenerate = async (
     confirmedQuizLanguage: LanguageCode,
     confirmedQuizMode: SelectableQuizMode,
-    confirmedSubject?: SubjectId
+    confirmedSubject?: SubjectId,
+    confirmedChapter?: string,
+    confirmedClass?: ClassLevel
   ) => {
     if (!pendingLaunch || generatingQuiz || quizGenInFlightRef.current) return;
     quizGenInFlightRef.current = true;
 
     const normalizedMode = normalizeQuizMode(confirmedQuizMode);
+    const resolvedClass: ClassLevel = confirmedClass ?? pendingLaunch.classLevel;
     const resolvedSubject: SubjectId = confirmedSubject ?? pendingLaunch.subject;
     const targetCurriculum = getClassSubjectCurriculum(
-      pendingLaunch.classLevel,
+      resolvedClass,
       resolvedSubject
     );
+
+    const topicCandidate = confirmedChapter ?? pendingLaunch.topic;
     const topicBelongsToSubject =
-      pendingLaunch.topic === 'All Verified Chapters' ||
-      targetCurriculum.chapters.some((ch) => ch.title.en === pendingLaunch.topic);
+      !topicCandidate ||
+      topicCandidate === 'All Verified Chapters' ||
+      targetCurriculum.chapters.some(
+        (ch) =>
+          ch.title.en === topicCandidate ||
+          ch.title.bn === topicCandidate ||
+          ch.title.hi === topicCandidate ||
+          ch.id === topicCandidate
+      );
+
     const resolvedTopic =
-      resolvedSubject === pendingLaunch.subject && topicBelongsToSubject
-        ? pendingLaunch.topic
+      topicBelongsToSubject && topicCandidate
+        ? topicCandidate
         : 'All Verified Chapters';
 
     const resolvedDuration: QuizDuration =
@@ -875,7 +994,10 @@ export default function App() {
     const resolvedDifficulty: DifficultyLevel =
       normalizedMode === 'challenge' ? 'hard' : pendingLaunch.difficulty;
 
-    // Persist the chosen quizLanguage and quizMode while keeping selectedClass, dashboard selectedSubject, and interfaceLanguage unchanged
+    // Persist user's chosen selections across navigation
+    setSelectedClass(resolvedClass);
+    setSelectedSubject(resolvedSubject);
+    setSelectedTopic(resolvedTopic);
     setQuizLanguage(confirmedQuizLanguage);
     setQuizMode(normalizedMode);
     setDurationMinutes(resolvedDuration);
@@ -884,7 +1006,7 @@ export default function App() {
 
     try {
       const excludedHistoryForTarget = buildExcludedHistoryPayload(
-        pendingLaunch.classLevel,
+        resolvedClass,
         resolvedSubject,
         resolvedTopic
       );
@@ -911,7 +1033,7 @@ export default function App() {
             originalAttemptId: pendingLaunch.originalAttemptId,
             originalConfig: {
               ...(origAttempt?.config || {}),
-              classLevel: pendingLaunch.classLevel,
+              classLevel: resolvedClass,
               subject: resolvedSubject,
               quizLanguage: confirmedQuizLanguage,
               topic: resolvedTopic,
@@ -951,7 +1073,7 @@ export default function App() {
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({
             mcqs: pendingLaunch.noteMcqs,
-            classLevel: pendingLaunch.classLevel,
+            classLevel: resolvedClass,
             subject: resolvedSubject,
             quizLanguage: confirmedQuizLanguage,
             topic: resolvedTopic,
@@ -972,7 +1094,7 @@ export default function App() {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
-          classLevel: pendingLaunch.classLevel,
+          classLevel: resolvedClass,
           subject: resolvedSubject,
           quizLanguage: confirmedQuizLanguage,
           topic: resolvedTopic,
@@ -1554,6 +1676,35 @@ export default function App() {
           }}
         />
 
+        {/* Configure Quiz — Chapter Selection Only Modal (Sets Chapter Preference Without Starting a Quiz) */}
+        {configureModalSubject && (
+          <ConfigureChapterModal
+            isOpen={Boolean(configureModalSubject)}
+            classLevel={selectedClass}
+            subjectId={configureModalSubject}
+            interfaceLanguage={interfaceLanguage}
+            selectedChapter={getConfiguredChapter(selectedClass, configureModalSubject)}
+            onSave={(savedChapter) => {
+              handleSaveConfiguredChapter(selectedClass, configureModalSubject, savedChapter);
+            }}
+            onClose={() => setConfigureModalSubject(null)}
+          />
+        )}
+
+        {/* Floating Save Toast for Chapter Configuration */}
+        {saveToast && (
+          <aside
+            role="status"
+            aria-live="polite"
+            className="fixed bottom-6 right-6 z-50 bg-slate-900 text-white text-xs sm:text-sm font-semibold px-4 py-3 rounded-xl shadow-2xl flex items-center gap-2.5 border border-slate-700 pointer-events-auto"
+          >
+            <CheckCircle2 className="w-4 h-4 text-emerald-400 shrink-0" />
+            <span>
+              <strong>{saveToast.subName}:</strong> {saveToast.message}
+            </span>
+          </aside>
+        )}
+
         {/* Desktop Sidebar Navigation (260px) */}
         <aside
           inert={generatingQuiz ? true : undefined}
@@ -1936,7 +2087,7 @@ export default function App() {
                     <div className="pt-2 flex flex-wrap items-center gap-3">
                       <button
                         type="button"
-                        onClick={() => requestQuizWithLanguageModal()}
+                        onClick={handleStartQuizFlow}
                         className="px-5 py-2.5 rounded-xl bg-slate-900 hover:bg-slate-800 text-white text-xs sm:text-sm font-semibold flex items-center gap-2 cursor-pointer whitespace-nowrap"
                       >
                         <PlayCircle className="w-4 h-4" />
@@ -2077,6 +2228,32 @@ export default function App() {
                     const stats = subjectWiseStats.find((s) => s.subjectId === sub.id);
                     const isSelectedOnDashboard = selectedSubject === sub.id;
 
+                    const configuredTopic = getConfiguredChapter(selectedClass, sub.id);
+                    const isAllChapters =
+                      !configuredTopic ||
+                      configuredTopic === 'All Verified Chapters' ||
+                      configuredTopic.toLowerCase().includes('all verified') ||
+                      configuredTopic.toLowerCase().includes('all chapters');
+
+                    let displayChapterName = '';
+                    if (isAllChapters) {
+                      displayChapterName =
+                        sub.id === 'hindi' || sub.id === 'hindi_subject'
+                          ? 'सभी सत्यापित अध्याय (All Verified Chapters)'
+                          : 'সকল যাচাইকৃত অধ্যায় (All Verified Chapters)';
+                    } else {
+                      const matchingCh = curr.chapters.find(
+                        (c) =>
+                          c.title.en === configuredTopic ||
+                          c.title.bn === configuredTopic ||
+                          c.title.hi === configuredTopic ||
+                          c.id === configuredTopic
+                      );
+                      displayChapterName = matchingCh
+                        ? getChapterDisplayName(matchingCh, sub.id)
+                        : configuredTopic;
+                    }
+
                     return (
                       <div
                         key={sub.id}
@@ -2122,6 +2299,33 @@ export default function App() {
                           <div className="pt-1 text-[11px] text-slate-500">
                             {curr.boardNote[interfaceLanguage]}
                           </div>
+
+                          {/* Configured Chapter Status on Subject Card */}
+                          <div className="pt-2">
+                            <div className="p-2.5 rounded-lg bg-indigo-50/70 border border-indigo-100 flex items-start justify-between gap-2 text-xs">
+                              <div className="min-w-0 flex-1">
+                                <div className="flex items-center gap-1.5 text-[10px] font-bold uppercase tracking-wider text-indigo-900/70">
+                                  <BookOpen className="w-3.5 h-3.5 text-indigo-600 shrink-0" />
+                                  <span>{t(interfaceLanguage, 'configuredChapterLabel')}</span>
+                                </div>
+                                <div
+                                  className="text-xs font-bold text-indigo-950 truncate mt-0.5"
+                                  title={displayChapterName}
+                                >
+                                  {displayChapterName}
+                                </div>
+                              </div>
+                              <span
+                                className={`px-2 py-0.5 text-[10px] font-bold rounded-full border shadow-2xs shrink-0 ${
+                                  isAllChapters
+                                    ? 'bg-white text-indigo-700 border-indigo-200'
+                                    : 'bg-indigo-600 text-white border-indigo-600'
+                                }`}
+                              >
+                                {isAllChapters ? 'All' : 'Selected'}
+                              </span>
+                            </div>
+                          </div>
                         </div>
 
                         <div className="pt-3 border-t border-slate-100 space-y-3">
@@ -2143,18 +2347,15 @@ export default function App() {
                           <div className="grid grid-cols-2 gap-2">
                             <button
                               type="button"
+                              disabled={generatingQuiz}
                               onClick={(e) => {
                                 e.stopPropagation();
-                                setSelectedSubject(sub.id);
-                                setSelectedTopic('All Verified Chapters');
-                                if (activeAttempt?.status === 'in_progress') {
-                                  setActiveAttempt(null);
-                                }
-                                setActiveNav('take_quiz');
+                                handleConfigureSubjectCard(sub.id);
                               }}
-                              className="py-2 px-3 rounded-lg border border-slate-300 bg-white hover:bg-slate-50 text-xs font-semibold text-slate-800 cursor-pointer whitespace-nowrap"
+                              className="py-2 px-3 rounded-lg border border-slate-300 bg-white hover:bg-slate-50 text-xs font-semibold text-slate-800 cursor-pointer whitespace-nowrap flex items-center justify-center gap-1.5 transition-colors"
                             >
-                              {t(interfaceLanguage, 'startSubjectQuiz')}
+                              <SlidersHorizontal className="w-3.5 h-3.5 text-slate-500 shrink-0" />
+                              <span>{t(interfaceLanguage, 'startSubjectQuiz')}</span>
                             </button>
 
                             <button
@@ -2164,9 +2365,10 @@ export default function App() {
                                 e.stopPropagation();
                                 handleQuickPracticeSubjectCard(sub.id);
                               }}
-                              className="py-2 px-3 rounded-lg bg-slate-900 hover:bg-slate-800 text-xs font-semibold text-white cursor-pointer whitespace-nowrap disabled:opacity-50"
+                              className="py-2 px-3 rounded-lg bg-slate-900 hover:bg-slate-800 text-xs font-semibold text-white cursor-pointer whitespace-nowrap disabled:opacity-50 flex items-center justify-center gap-1.5 transition-colors"
                             >
-                              {t(interfaceLanguage, 'quickPracticeBtn')}
+                              <Play className="w-3.5 h-3.5 shrink-0" />
+                              <span>{t(interfaceLanguage, 'quickPracticeBtn')}</span>
                             </button>
                           </div>
                         </div>
@@ -2202,7 +2404,7 @@ export default function App() {
                       </p>
                       <button
                         type="button"
-                        onClick={() => requestQuizWithLanguageModal()}
+                        onClick={handleStartQuizFlow}
                         className="px-4 py-2 rounded-lg bg-slate-900 text-white text-xs font-semibold cursor-pointer"
                       >
                         {t(interfaceLanguage, 'startQuizBtn')}
@@ -2606,12 +2808,31 @@ export default function App() {
                     </div>
                   </div>
 
-                  {/* Start Quiz & Generate New Quiz Action Buttons — Both open Language Selection Modal first */}
+                  {/* Start Quiz & Generate New Quiz Action Buttons — Never ask for Subject again since already chosen on page */}
                   <div className="flex flex-wrap items-center justify-end gap-3 pt-2">
                     <button
                       type="button"
                       disabled={generatingQuiz}
-                      onClick={() => requestQuizWithLanguageModal()}
+                      onClick={() =>
+                        requestQuizWithLanguageModal(
+                          {
+                            classLevel: selectedClass,
+                            subject: selectedSubject,
+                            topic: selectedTopic,
+                            difficulty,
+                            questionCount,
+                            questionType,
+                            durationMinutes,
+                            mode: quizMode,
+                          },
+                          'standard',
+                          {
+                            skipClassStep: true,
+                            skipSubjectStep: true,
+                            skipChapterStep: true,
+                          }
+                        )
+                      }
                       className="px-5 py-3 rounded-xl border border-slate-300 bg-white hover:bg-slate-50 text-slate-900 font-semibold text-sm flex items-center gap-2 cursor-pointer disabled:opacity-50"
                     >
                       <RefreshCw className="w-4 h-4" />
@@ -2621,7 +2842,26 @@ export default function App() {
                     <button
                       type="button"
                       disabled={generatingQuiz}
-                      onClick={() => requestQuizWithLanguageModal()}
+                      onClick={() =>
+                        requestQuizWithLanguageModal(
+                          {
+                            classLevel: selectedClass,
+                            subject: selectedSubject,
+                            topic: selectedTopic,
+                            difficulty,
+                            questionCount,
+                            questionType,
+                            durationMinutes,
+                            mode: quizMode,
+                          },
+                          'standard',
+                          {
+                            skipClassStep: true,
+                            skipSubjectStep: true,
+                            skipChapterStep: true,
+                          }
+                        )
+                      }
                       className="px-6 py-3 rounded-xl bg-slate-900 hover:bg-slate-800 text-white font-semibold text-sm flex items-center gap-2 cursor-pointer disabled:opacity-50"
                     >
                       <Sparkles className="w-4 h-4" />
@@ -2705,16 +2945,20 @@ export default function App() {
                           type="button"
                           disabled={generatingQuiz}
                           onClick={() =>
-                            requestQuizWithLanguageModal({
-                              classLevel: selectedClass,
-                              subject: sub.id,
-                              topic: 'All Verified Chapters',
-                              difficulty: 'mixed',
-                              questionCount: 10,
-                              questionType: 'mixed',
-                              durationMinutes: 7,
-                              mode: 'test',
-                            })
+                            requestQuizWithLanguageModal(
+                              {
+                                classLevel: selectedClass,
+                                subject: sub.id,
+                                topic: 'All Verified Chapters',
+                                difficulty: 'mixed',
+                                questionCount: 10,
+                                questionType: 'mixed',
+                                durationMinutes: 7,
+                                mode: 'test',
+                              },
+                              'standard',
+                              { skipSubjectStep: true }
+                            )
                           }
                           className="flex-1 py-2.5 px-3 rounded-lg bg-slate-900 hover:bg-slate-800 text-white text-xs font-semibold cursor-pointer text-center"
                         >
@@ -2725,16 +2969,20 @@ export default function App() {
                           type="button"
                           disabled={generatingQuiz}
                           onClick={() =>
-                            requestQuizWithLanguageModal({
-                              classLevel: selectedClass,
-                              subject: sub.id,
-                              topic: 'All Verified Chapters',
-                              difficulty: 'mixed',
-                              questionCount: 5,
-                              questionType: 'mcq',
-                              durationMinutes: 0,
-                              mode: 'practice',
-                            })
+                            requestQuizWithLanguageModal(
+                              {
+                                classLevel: selectedClass,
+                                subject: sub.id,
+                                topic: 'All Verified Chapters',
+                                difficulty: 'mixed',
+                                questionCount: 5,
+                                questionType: 'mcq',
+                                durationMinutes: 0,
+                                mode: 'practice',
+                              },
+                              'standard',
+                              { skipSubjectStep: true }
+                            )
                           }
                           className="flex-1 py-2.5 px-3 rounded-lg border border-slate-300 bg-white hover:bg-slate-50 text-slate-800 text-xs font-semibold cursor-pointer text-center"
                         >
