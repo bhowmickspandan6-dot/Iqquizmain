@@ -1,4 +1,4 @@
-import { SubjectDefinition, ch } from './curriculumTypes';
+import { ch, type SubjectDefinition } from './curriculumTypes.ts';
 
 const TB_MATH_5 = {
   en: 'Amar Ganit (Class V — WBBPE)',

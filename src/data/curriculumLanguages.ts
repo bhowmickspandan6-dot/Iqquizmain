@@ -1,4 +1,4 @@
-import { SubjectDefinition, ch } from './curriculumTypes';
+import { ch, type SubjectDefinition } from './curriculumTypes.ts';
 
 const TB_ENG_5 = {
   en: 'Butterfly — English Textbook for Class V (WBBPE)',

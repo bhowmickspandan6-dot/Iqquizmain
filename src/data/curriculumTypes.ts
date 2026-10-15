@@ -1,9 +1,9 @@
-import {
+import type {
   ClassLevel,
   CurriculumVerificationStatus,
   LanguageCode,
   SubjectId,
-} from '../types';
+} from '../types.ts';
 
 export interface CurriculumChapter {
   id: string;

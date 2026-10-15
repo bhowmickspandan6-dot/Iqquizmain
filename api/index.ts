@@ -1,9 +1,9 @@
-import 'dotenv/config';
+if (!process.env.VERCEL && typeof process.loadEnvFile === 'function') { try { process.loadEnvFile(); } catch {} }
 import crypto from 'crypto';
 import { GoogleGenAI, ThinkingLevel, Type } from '@google/genai';
 import {
   CLASS_LEVELS,
-  CurriculumChapter,
+  type CurriculumChapter,
   getClassCurriculum,
   getSubjectDefinition,
   getSubjectsForClass,

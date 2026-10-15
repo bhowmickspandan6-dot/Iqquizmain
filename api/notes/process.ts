@@ -6,5 +6,6 @@ export const config = {
 
 export default async function (req: any, res: any) {
   req.url = '/api/notes/process';
+  req.originalUrl = '/api/notes/process';
   return handler(req, res);
 }

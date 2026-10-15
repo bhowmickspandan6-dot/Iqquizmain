@@ -6,5 +6,6 @@ export const config = {
 
 export default async function (req: any, res: any) {
   req.url = '/api/quiz/retake';
+  req.originalUrl = '/api/quiz/retake';
   return handler(req, res);
 }

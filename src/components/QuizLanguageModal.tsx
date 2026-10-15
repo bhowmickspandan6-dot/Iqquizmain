@@ -878,10 +878,11 @@ export const QuizLanguageModal: React.FC<QuizLanguageModalProps> = ({
                                 </div>
                                 <button
                                   type="button"
+                                  disabled={isGenerating}
                                   onClick={handleConfirmStartQuiz}
-                                  className="px-3 py-1.5 rounded-lg bg-red-700 hover:bg-red-800 text-white font-semibold shrink-0 flex items-center gap-1.5 cursor-pointer"
+                                  className="px-3 py-1.5 rounded-lg bg-red-700 hover:bg-red-800 disabled:opacity-60 text-white font-semibold shrink-0 flex items-center gap-1.5 cursor-pointer transition-opacity"
                                 >
-                                  <RefreshCw className="w-3.5 h-3.5" />
+                                  <RefreshCw className={`w-3.5 h-3.5 ${isGenerating ? 'animate-spin' : ''}`} />
                                   <span>{t(interfaceLanguage, 'langModalRetryBtn')}</span>
                                 </button>
                               </motion.div>
@@ -1164,10 +1165,11 @@ export const QuizLanguageModal: React.FC<QuizLanguageModalProps> = ({
                                 </div>
                                 <button
                                   type="button"
+                                  disabled={isGenerating}
                                   onClick={handleConfirmStartQuiz}
-                                  className="px-3 py-1.5 rounded-lg bg-red-700 hover:bg-red-800 text-white font-semibold shrink-0 flex items-center gap-1.5 cursor-pointer"
+                                  className="px-3 py-1.5 rounded-lg bg-red-700 hover:bg-red-800 disabled:opacity-60 text-white font-semibold shrink-0 flex items-center gap-1.5 cursor-pointer transition-opacity"
                                 >
-                                  <RefreshCw className="w-3.5 h-3.5" />
+                                  <RefreshCw className={`w-3.5 h-3.5 ${isGenerating ? 'animate-spin' : ''}`} />
                                   <span>{t(interfaceLanguage, 'langModalRetryBtn')}</span>
                                 </button>
                               </motion.div>

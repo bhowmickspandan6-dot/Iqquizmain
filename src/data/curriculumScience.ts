@@ -1,4 +1,4 @@
-import { SubjectDefinition, ch } from './curriculumTypes';
+import { ch, type SubjectDefinition } from './curriculumTypes.ts';
 
 const TB_EVS_5 = {
   en: 'Amader Paribesh (Class V — WBBPE)',

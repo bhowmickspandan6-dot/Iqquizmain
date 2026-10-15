@@ -1,26 +1,26 @@
-import { ClassLevel, SubjectId } from '../types';
-import {
+import type { ClassLevel, SubjectId } from '../types.ts';
+import type {
   CurriculumChapter,
   ClassSubjectCurriculum,
   SubjectDefinition,
-} from './curriculumTypes';
-import { MATHEMATICS_SUBJECT } from './curriculumMath';
+} from './curriculumTypes.ts';
+import { MATHEMATICS_SUBJECT } from './curriculumMath.ts';
 import {
   EVS_SUBJECT,
   SCIENCE_SUBJECT,
   PHYSICAL_SCIENCE_SUBJECT,
   LIFE_SCIENCE_SUBJECT,
-} from './curriculumScience';
+} from './curriculumScience.ts';
 import {
   HISTORY_SUBJECT,
   GEOGRAPHY_SUBJECT,
   HISTORY_GEOGRAPHY_LEGACY_SUBJECT,
-} from './curriculumSocial';
+} from './curriculumSocial.ts';
 import {
   ENGLISH_SUBJECT,
   BANGLA_SUBJECT,
   HINDI_SUBJECT,
-} from './curriculumLanguages';
+} from './curriculumLanguages.ts';
 
 export type {
   CurriculumChapter,

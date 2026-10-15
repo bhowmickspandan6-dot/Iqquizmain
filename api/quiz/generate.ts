@@ -6,5 +6,6 @@ export const config = {
 
 export default async function (req: any, res: any) {
   req.url = '/api/quiz/generate';
+  req.originalUrl = '/api/quiz/generate';
   return handler(req, res);
 }
