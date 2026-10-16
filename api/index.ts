@@ -104,17 +104,73 @@ export const config = {
   maxDuration: 30,
 };
 
-function logServerError(context: string, err: any, extra?: Record<string, any>) {
-  const safeDetails = {
+export type ServerApiErrorCode =
+  | 'CONFIG_ERROR'
+  | 'AUTH_ERROR'
+  | 'QUOTA_ERROR'
+  | 'UNAVAILABLE_ERROR'
+  | 'TIMEOUT_ERROR'
+  | 'PARSING_ERROR'
+  | 'VALIDATION_ERROR'
+  | 'SERVER_ERROR'
+  | 'NOT_FOUND_ERROR';
+
+export interface ServerApiErrorPayload {
+  error: string;
+  code: ServerApiErrorCode;
+  correlationId: string;
+  stage: string;
+  retryable: boolean;
+  durationMs?: number;
+}
+
+function sanitizeLogMessage(msg: unknown): string {
+  if (typeof msg !== 'string') {
+    msg = msg ? String(msg) : '';
+  }
+  return (msg as string)
+    .replace(/AIza[0-9A-Za-z-_]{35}/g, '[REDACTED_API_KEY]')
+    .replace(/(?:key|apiKey|token|password|secret)=([^&\s]+)/gi, '$1=[REDACTED]')
+    .replace(/Bearer\s+[A-Za-z0-9._-]+/gi, 'Bearer [REDACTED]');
+}
+
+function logDiagnostic(
+  stage: string,
+  details: {
+    correlationId?: string;
+    route?: string;
+    model?: string;
+    status?: number;
+    durationMs?: number;
+    message?: string;
+    error?: any;
+    extra?: Record<string, any>;
+  }
+) {
+  const safePayload = {
     timestamp: new Date().toISOString(),
-    context,
-    name: err?.name || 'Error',
-    message: err?.message || String(err),
-    status: err?.status || err?.statusCode || undefined,
-    code: err?.code || undefined,
-    ...(extra || {}),
+    correlationId: details.correlationId || 'none',
+    stage,
+    route: details.route || 'unknown',
+    model: details.model || undefined,
+    status: details.status || undefined,
+    durationMs: details.durationMs !== undefined ? `${details.durationMs}ms` : undefined,
+    message: details.message ? sanitizeLogMessage(details.message) : undefined,
+    errorName: details.error?.name || undefined,
+    errorMessage: details.error
+      ? sanitizeLogMessage(details.error?.message || details.error)
+      : undefined,
+    ...(details.extra || {}),
   };
-  console.warn(`[IQ Quiz Server Notice] ${context}:`, JSON.stringify(safeDetails));
+  console.info(`[IQ Quiz Diagnostic] [${details.correlationId || 'SYS'}] [${stage}]`, JSON.stringify(safePayload));
+}
+
+function logServerError(context: string, err: any, extra?: Record<string, any>) {
+  logDiagnostic('SERVER_ERROR', {
+    message: context,
+    error: err,
+    extra,
+  });
 }
 
 function sanitizeEnvApiKey(raw: unknown): string {
@@ -220,15 +276,18 @@ async function generateContentWithModelFallback(
   params: {
     contents: any;
     config?: any;
+    correlationId?: string;
   }
-): Promise<{ response: any; modelUsed: string }> {
+): Promise<{ response: any; modelUsed: string; durationMs: number }> {
+  const correlationId = params.correlationId || 'req_internal';
   const candidateModels = getOrderedCandidateModels();
   let lastError: any = null;
+  const startTotal = Date.now();
 
   for (let i = 0; i < candidateModels.length; i++) {
     const modelName = candidateModels[i];
+    const startAttempt = Date.now();
     try {
-      // Configure low-latency thinking so structured JSON generation completes in ~1-2s
       const isLowLatencyThinking =
         modelName.includes('3') ||
         modelName.includes('flash-latest') ||
@@ -242,6 +301,12 @@ async function generateContentWithModelFallback(
         ...(thinkingConfig ? { thinkingConfig } : {}),
       };
 
+      logDiagnostic('MODEL_ATTEMPT_START', {
+        correlationId,
+        model: modelName,
+        message: `Calling model ${modelName} (attempt ${i + 1}/${candidateModels.length})`,
+      });
+
       const response = await withTimeout(
         ai.models.generateContent({
           model: modelName,
@@ -251,28 +316,66 @@ async function generateContentWithModelFallback(
         GEMINI_TIMEOUT_MS,
         `Gemini generateContent (${modelName})`
       );
+
+      const attemptDuration = Date.now() - startAttempt;
       modelCooldownUntil.delete(modelName);
-      return { response, modelUsed: modelName };
+
+      logDiagnostic('MODEL_ATTEMPT_SUCCESS', {
+        correlationId,
+        model: modelName,
+        durationMs: attemptDuration,
+        message: `Generated successfully with ${modelName} in ${attemptDuration}ms`,
+      });
+
+      return {
+        response,
+        modelUsed: modelName,
+        durationMs: Date.now() - startTotal,
+      };
     } catch (err: any) {
       lastError = err;
+      const attemptDuration = Date.now() - startAttempt;
       const msg = String(err?.message || err || '').toLowerCase();
-      // If API key itself is invalid, fail immediately without trying fallback models
-      if (msg.includes('api_key_invalid') || msg.includes('api key not valid')) {
-        logServerError('Gemini API key rejected', err, { modelName });
+      const status = err?.status || err?.statusCode;
+
+      logDiagnostic('MODEL_ATTEMPT_FAILED', {
+        correlationId,
+        model: modelName,
+        status,
+        durationMs: attemptDuration,
+        error: err,
+      });
+
+      // If API key itself is invalid or unauthorized, fail immediately without exhausting quotas on other models
+      if (
+        status === 401 ||
+        status === 403 ||
+        msg.includes('api_key_invalid') ||
+        msg.includes('api key not valid') ||
+        msg.includes('invalid api key') ||
+        msg.includes('permission_denied')
+      ) {
+        logDiagnostic('AUTH_ERROR_ABORT', {
+          correlationId,
+          model: modelName,
+          status: status || 401,
+          message: 'Gemini API authentication rejected. Aborting model fallback chain.',
+        });
         break;
       }
+
       recordModelFailureCooldown(modelName, err);
+
       if (i < candidateModels.length - 1) {
-        console.info(
-          `[IQ Quiz Server] Model ${modelName} attempt ${i + 1} unavailable; switching to ${candidateModels[i + 1]}`
-        );
-      } else {
-        logServerError('All Gemini candidate models failed', err, {
-          triedModels: candidateModels,
+        logDiagnostic('MODEL_SWITCHING', {
+          correlationId,
+          model: modelName,
+          message: `Switching to fallback model ${candidateModels[i + 1]}`,
         });
       }
     }
   }
+
   throw lastError || new Error('Gemini API request failed across all available models.');
 }
 
@@ -2027,43 +2130,54 @@ export default async function handler(req: any, res: any) {
         sendJson(res, 200, sanitizeAttemptForClient(attempt));
         return;
       } catch (aiErr: any) {
+        const status = aiErr?.status || aiErr?.statusCode || 503;
         logServerError('Gemini quiz generation failed in /api/quiz/generate', aiErr, {
           classLevel: validClass,
           subject,
           quizLanguage: validQuizLang,
+          status,
         });
         const msg = String(aiErr?.message || aiErr || '').toLowerCase();
-        if (msg.includes('api_key_invalid') || msg.includes('api key not valid') || msg.includes('invalid api key')) {
+        if (
+          status === 401 ||
+          status === 403 ||
+          msg.includes('api_key_invalid') ||
+          msg.includes('api key not valid') ||
+          msg.includes('invalid api key') ||
+          msg.includes('permission_denied')
+        ) {
           sendJson(res, 401, {
             error:
-              'The configured GEMINI_API_KEY on the server was rejected by Google Gemini API. Please verify your GEMINI_API_KEY in Project Settings → Environment Variables.',
+              'The configured GEMINI_API_KEY on the server was rejected or unauthorized by Google Gemini API. Please verify your GEMINI_API_KEY in Vercel Project Settings → Environment Variables and redeploy.',
           });
           return;
         }
-        if (msg.includes('429') || msg.includes('resource_exhausted') || msg.includes('quota')) {
+        if (status === 429 || msg.includes('429') || msg.includes('resource_exhausted') || msg.includes('quota')) {
           sendJson(res, 429, {
             error:
               'Gemini AI rate limit or quota exceeded. Please wait a few seconds and click Retry Quiz Generation.',
           });
           return;
         }
-        if (msg.includes('503') || msg.includes('high demand') || msg.includes('unavailable')) {
+        if (status === 503 || msg.includes('503') || msg.includes('high demand') || msg.includes('unavailable')) {
           sendJson(res, 503, {
             error:
-              'Gemini AI is currently experiencing high temporary demand. Please click Retry Quiz Generation to try again.',
+              'Gemini AI is currently experiencing high temporary demand (HTTP 503). Please click Retry Quiz Generation to try again.',
           });
           return;
         }
-        if (msg.includes('timed out') || msg.includes('timeout')) {
+        if (status === 504 || msg.includes('timed out') || msg.includes('timeout')) {
           sendJson(res, 504, {
             error:
               'Gemini AI request timed out. Please click Retry Quiz Generation to try again.',
           });
           return;
         }
-        sendJson(res, 503, {
-          error:
-            'Unable to reach Gemini AI right now to generate fresh questions. Please click Retry Quiz Generation.',
+        const detailedMessage = aiErr?.message
+          ? `Gemini API error: ${aiErr.message}`
+          : 'Unable to reach Gemini AI right now to generate fresh questions. Please click Retry Quiz Generation.';
+        sendJson(res, status >= 400 && status < 600 ? status : 503, {
+          error: detailedMessage,
         });
         return;
       }
