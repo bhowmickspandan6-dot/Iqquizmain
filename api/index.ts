@@ -367,10 +367,21 @@ async function generateContentWithModelFallback(
       recordModelFailureCooldown(modelName, err);
 
       if (i < candidateModels.length - 1) {
+        const isTemporary =
+          status === 429 ||
+          status === 503 ||
+          msg.includes('429') ||
+          msg.includes('quota') ||
+          msg.includes('503') ||
+          msg.includes('high demand') ||
+          msg.includes('unavailable');
+        const backoffMs = isTemporary ? Math.min(800 * Math.pow(1.5, i), 2500) : 50;
+        await sleep(backoffMs);
+
         logDiagnostic('MODEL_SWITCHING', {
           correlationId,
           model: modelName,
-          message: `Switching to fallback model ${candidateModels[i + 1]}`,
+          message: `Switching to fallback model ${candidateModels[i + 1]} after ${backoffMs}ms backoff`,
         });
       }
     }
@@ -3148,9 +3159,9 @@ Make explanations clear, student-friendly, and factually accurate.`,
         logServerError('Gemini AI Chat failed in /api/chat/message', aiErr);
         const msg = String(aiErr?.message || aiErr || '').toLowerCase();
         if (msg.includes('api_key_invalid') || msg.includes('api key not valid')) {
-          sendJson(res, 503, {
+          sendJson(res, 401, {
             error:
-              'The configured GEMINI_API_KEY on the server was rejected as invalid. Please verify GEMINI_API_KEY in your Environment Variables and redeploy.',
+              'The configured GEMINI_API_KEY on the server was rejected as invalid. Please verify GEMINI_API_KEY in your Vercel Environment Variables and redeploy.',
           });
           return;
         }
