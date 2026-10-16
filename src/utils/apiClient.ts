@@ -58,7 +58,7 @@ export async function safeFetchJson<T = any>(
     }
     if (response.status >= 500) {
       throw new Error(
-        `A temporary server error occurred while connecting to the quiz service (HTTP ${response.status}). Please click Retry Quiz Generation to generate fresh questions.`
+        `A server error occurred (HTTP ${response.status}). If deployed on Vercel, please confirm GEMINI_API_KEY is set in Vercel Settings → Environment Variables and redeploy.`
       );
     }
     const preview = trimmed.replace(/<[^>]*>/g, ' ').replace(/\s+/g, ' ').slice(0, 120);
@@ -100,7 +100,7 @@ export async function safeFetchJson<T = any>(
       serverErrorMsg.toLowerCase().includes('an unexpected server error')
     ) {
       serverErrorMsg =
-        'A temporary server error occurred while connecting to the AI quiz service. Please click Retry Quiz Generation.';
+        'A server error occurred while connecting to the AI service. If deployed on Vercel, please confirm GEMINI_API_KEY is set in Vercel Settings → Environment Variables and redeploy.';
     }
 
     throw new Error(serverErrorMsg);
