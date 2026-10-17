@@ -8,7 +8,7 @@ import {
   getSubjectDefinition,
   getSubjectsForClass,
   resolveCurriculumChaptersForQuiz,
-} from './curriculumData.ts';
+} from './curriculumData';
 
 // Official supported Gemini models: fast, low-latency, and free-tier eligible
 const SUPPORTED_GEMINI_MODELS = [
@@ -525,7 +525,9 @@ function resolveRoutePath(req: any): string {
     !cleanPath.startsWith('/api/') &&
     (cleanPath.startsWith('/quiz/') ||
       cleanPath.startsWith('/notes/') ||
-      cleanPath.startsWith('/ai/'))
+      cleanPath.startsWith('/ai/') ||
+      cleanPath.startsWith('/chat/') ||
+      cleanPath.startsWith('/curriculum'))
   ) {
     cleanPath = `/api${cleanPath}`;
   }
