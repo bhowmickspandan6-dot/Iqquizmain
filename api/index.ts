@@ -8,7 +8,7 @@ import {
   getSubjectDefinition,
   getSubjectsForClass,
   resolveCurriculumChaptersForQuiz,
-} from '../src/data/curriculum.ts';
+} from './curriculumData.ts';
 
 // Official supported Gemini models: fast, low-latency, and free-tier eligible
 const SUPPORTED_GEMINI_MODELS = [
@@ -202,8 +202,9 @@ function getServerApiKey(): string {
     return primaryKey;
   }
 
-  // 2. Server-only fallbacks (never client-prefixed VITE_ variables)
+  // 2. Server-side fallbacks (including if user added VITE_ prefix in hosting dashboard)
   const serverFallbacks = [
+    process.env.VITE_GEMINI_API_KEY,
     process.env.GOOGLE_GEMINI_API_KEY,
     process.env.GOOGLE_GENAI_API_KEY,
     process.env.GOOGLE_API_KEY,
@@ -215,10 +216,15 @@ function getServerApiKey(): string {
     }
   }
 
-  // 3. Tolerate accidental whitespace or case differences in the GEMINI_API_KEY key name in hosting dashboards
+  // 3. Tolerate accidental whitespace, case differences, or prefixes in hosting dashboards
   if (process.env && typeof process.env === 'object') {
     for (const [envKey, envVal] of Object.entries(process.env)) {
-      if (envKey.trim().toUpperCase() === 'GEMINI_API_KEY') {
+      const normalizedKey = envKey.trim().toUpperCase();
+      if (
+        normalizedKey === 'GEMINI_API_KEY' ||
+        normalizedKey === 'VITE_GEMINI_API_KEY' ||
+        normalizedKey.endsWith('_GEMINI_API_KEY')
+      ) {
         const cleaned = sanitizeEnvApiKey(envVal);
         if (cleaned) {
           return cleaned;
