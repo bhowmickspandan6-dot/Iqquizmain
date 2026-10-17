@@ -263,6 +263,7 @@ export interface ChatConversation {
   language: LanguageCode;
   replyLanguage?: ChatLanguagePreference;
   messages: ChatMessageItem[];
+  pinned?: boolean;
 }
 
 export type NavSection =

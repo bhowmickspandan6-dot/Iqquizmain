@@ -11,6 +11,10 @@ import {
   Check,
   PanelLeft,
   X,
+  Pin,
+  PinOff,
+  Pencil,
+  MoreVertical,
 } from 'lucide-react';
 import {
   ChatConversation,
@@ -181,10 +185,214 @@ export const AiChatView: React.FC<AiChatViewProps> = ({
   const [copiedMessageId, setCopiedMessageId] = useState<string | null>(null);
   const [mobileHistoryOpen, setMobileHistoryOpen] = useState(false);
 
+  // Context Menu, Rename, and Delete Dialog State
+  const [contextMenu, setContextMenu] = useState<{
+    chatId: string;
+    x: number;
+    y: number;
+  } | null>(null);
+
+  const [renameModal, setRenameModal] = useState<{
+    chatId: string;
+    currentTitle: string;
+  } | null>(null);
+  const [renameInput, setRenameInput] = useState('');
+  const renameInputRef = useRef<HTMLInputElement | null>(null);
+
+  const [deleteModal, setDeleteModal] = useState<{
+    chatId: string;
+    title: string;
+  } | null>(null);
+
+  // Touch long-press handling with cancellation on scroll/drag
+  const touchStartPosRef = useRef<{ x: number; y: number } | null>(null);
+  const longPressTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const longPressTriggeredRef = useRef(false);
+
+  const cancelLongPress = () => {
+    if (longPressTimeoutRef.current) {
+      clearTimeout(longPressTimeoutRef.current);
+      longPressTimeoutRef.current = null;
+    }
+    touchStartPosRef.current = null;
+  };
+
+  const openContextMenu = (conv: ChatConversation, rawX: number, rawY: number) => {
+    const MENU_WIDTH = 208;
+    const MENU_HEIGHT = 175;
+    const padding = 12;
+
+    let x = rawX;
+    let y = rawY;
+
+    if (typeof window !== 'undefined') {
+      if (x + MENU_WIDTH > window.innerWidth - padding) {
+        x = Math.max(padding, window.innerWidth - MENU_WIDTH - padding);
+      }
+      if (y + MENU_HEIGHT > window.innerHeight - padding) {
+        y = Math.max(padding, window.innerHeight - MENU_HEIGHT - padding);
+      }
+    }
+
+    setContextMenu({
+      chatId: conv.chatId,
+      x,
+      y,
+    });
+  };
+
+  const handleTouchStart = (conv: ChatConversation, e: React.TouchEvent) => {
+    if (e.touches.length !== 1) return;
+    const touch = e.touches[0];
+    touchStartPosRef.current = { x: touch.clientX, y: touch.clientY };
+    longPressTriggeredRef.current = false;
+
+    cancelLongPress();
+    longPressTimeoutRef.current = setTimeout(() => {
+      longPressTriggeredRef.current = true;
+      if (typeof navigator !== 'undefined' && 'vibrate' in navigator) {
+        try {
+          navigator.vibrate(40);
+        } catch {}
+      }
+      openContextMenu(conv, touch.clientX, touch.clientY);
+    }, 500);
+  };
+
+  const handleTouchMove = (e: React.TouchEvent) => {
+    if (!touchStartPosRef.current || e.touches.length !== 1) return;
+    const touch = e.touches[0];
+    const dx = touch.clientX - touchStartPosRef.current.x;
+    const dy = touch.clientY - touchStartPosRef.current.y;
+    // Cancel long-press if user moves finger significantly (scroll gesture)
+    if (dx * dx + dy * dy > 64) {
+      cancelLongPress();
+    }
+  };
+
+  const handleTouchEnd = () => {
+    cancelLongPress();
+    setTimeout(() => {
+      longPressTriggeredRef.current = false;
+    }, 120);
+  };
+
+  const handleContextMenu = (conv: ChatConversation, e: React.MouseEvent) => {
+    e.preventDefault();
+    e.stopPropagation();
+    openContextMenu(conv, e.clientX, e.clientY);
+  };
+
+  const handleConversationClick = (conv: ChatConversation, isMobileDrawer: boolean) => {
+    if (longPressTriggeredRef.current) {
+      longPressTriggeredRef.current = false;
+      return;
+    }
+    setContextMenu(null);
+    onSelectChat(conv.chatId);
+    setErrorMsg(null);
+    setLastFailedPrompt(null);
+    if (isMobileDrawer) setMobileHistoryOpen(false);
+  };
+
+  // Close context menu on outside click, scroll, or Escape key
+  useEffect(() => {
+    if (!contextMenu) return;
+
+    const handlePointerDown = (e: MouseEvent | TouchEvent) => {
+      const target = e.target as HTMLElement;
+      if (!target.closest('[data-chat-context-menu]')) {
+        setContextMenu(null);
+      }
+    };
+
+    const handleScroll = () => {
+      setContextMenu(null);
+    };
+
+    const handleKeyDown = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') {
+        setContextMenu(null);
+      }
+    };
+
+    window.addEventListener('pointerdown', handlePointerDown);
+    window.addEventListener('scroll', handleScroll, true);
+    window.addEventListener('keydown', handleKeyDown);
+
+    return () => {
+      window.removeEventListener('pointerdown', handlePointerDown);
+      window.removeEventListener('scroll', handleScroll, true);
+      window.removeEventListener('keydown', handleKeyDown);
+    };
+  }, [contextMenu]);
+
+  // Focus rename input when rename modal opens
+  useEffect(() => {
+    if (renameModal) {
+      setTimeout(() => {
+        renameInputRef.current?.focus();
+        renameInputRef.current?.select();
+      }, 50);
+    }
+  }, [renameModal]);
+
+  const handleOpenRename = (conv: ChatConversation) => {
+    setContextMenu(null);
+    setRenameModal({
+      chatId: conv.chatId,
+      currentTitle: conv.title,
+    });
+    setRenameInput(conv.title);
+  };
+
+  const handleSaveRename = (e?: React.FormEvent) => {
+    if (e) e.preventDefault();
+    if (!renameModal) return;
+    const trimmed = renameInput.trim();
+    if (!trimmed) return;
+    const conv = conversations.find((c) => c.chatId === renameModal.chatId);
+    if (conv) {
+      const updated: ChatConversation = {
+        ...conv,
+        title: trimmed,
+        updatedAt: new Date().toISOString(),
+      };
+      onUpsertConversation(updated, true);
+    }
+    setRenameModal(null);
+  };
+
+  const handleTogglePin = (conv: ChatConversation) => {
+    setContextMenu(null);
+    const updated: ChatConversation = {
+      ...conv,
+      pinned: !conv.pinned,
+    };
+    onUpsertConversation(updated, true);
+  };
+
+  const handleOpenDelete = (conv: ChatConversation) => {
+    setContextMenu(null);
+    setDeleteModal({
+      chatId: conv.chatId,
+      title: conv.title,
+    });
+  };
+
+  const handleConfirmDelete = () => {
+    if (!deleteModal) return;
+    onDeleteConversation(deleteModal.chatId);
+    setDeleteModal(null);
+  };
+
   const messagesEndRef = useRef<HTMLDivElement | null>(null);
   const textareaRef = useRef<HTMLTextAreaElement | null>(null);
 
   const activeConversation = conversations.find((c) => c.chatId === activeChatId) || null;
+  const activeConvForMenu = contextMenu
+    ? conversations.find((c) => c.chatId === contextMenu.chatId) || null
+    : null;
   const activeMessages = activeConversation?.messages || [];
 
   useEffect(() => {
@@ -532,40 +740,46 @@ export const AiChatView: React.FC<AiChatViewProps> = ({
       <div className="flex-1 overflow-y-auto px-2 py-2 space-y-0.5">
         {conversations.map((conv) => {
           const isSelected = conv.chatId === activeChatId;
+          const isMenuOpenForThis = contextMenu?.chatId === conv.chatId;
+
           return (
             <div
               key={conv.chatId}
-              className={`group relative rounded-lg transition-colors ${
+              onContextMenu={(e) => handleContextMenu(conv, e)}
+              onTouchStart={(e) => handleTouchStart(conv, e)}
+              onTouchMove={handleTouchMove}
+              onTouchEnd={handleTouchEnd}
+              onTouchCancel={cancelLongPress}
+              className={`group relative rounded-lg transition-colors select-none ${
                 isSelected
                   ? 'bg-slate-200/80 text-slate-900 font-semibold'
                   : 'text-slate-700 hover:bg-slate-200/40'
-              }`}
+              } ${isMenuOpenForThis ? 'ring-1 ring-slate-400 bg-slate-200/60' : ''}`}
             >
               <button
                 type="button"
-                onClick={() => {
-                  onSelectChat(conv.chatId);
-                  setErrorMsg(null);
-                  setLastFailedPrompt(null);
-                  if (isMobileDrawer) setMobileHistoryOpen(false);
-                }}
-                className="w-full text-left px-3 py-2 pr-8 flex items-center gap-2 text-xs cursor-pointer"
+                onClick={() => handleConversationClick(conv, isMobileDrawer)}
+                className="w-full text-left px-3 py-2 pr-7 flex items-center gap-2 text-xs cursor-pointer"
               >
-                <MessageSquare className="w-3.5 h-3.5 text-slate-500 shrink-0" />
-                <span className="truncate">{conv.title}</span>
+                {conv.pinned ? (
+                  <Pin className="w-3.5 h-3.5 text-amber-500 fill-amber-500/20 shrink-0" aria-label="Pinned" />
+                ) : (
+                  <MessageSquare className="w-3.5 h-3.5 text-slate-500 shrink-0" />
+                )}
+                <span className="truncate flex-1">{conv.title}</span>
               </button>
 
               <button
                 type="button"
                 onClick={(e) => {
                   e.stopPropagation();
-                  onDeleteConversation(conv.chatId);
+                  openContextMenu(conv, e.clientX, e.clientY);
                 }}
-                title={t(interfaceLanguage, 'deleteChatLabel')}
-                aria-label={t(interfaceLanguage, 'deleteChatLabel')}
-                className="absolute right-1.5 top-1.5 p-1 rounded text-slate-400 hover:text-rose-600 opacity-0 group-hover:opacity-100 focus:opacity-100 transition-opacity cursor-pointer"
+                title={t(interfaceLanguage, 'renameChatLabel')}
+                aria-label="Conversation options"
+                className="absolute right-1 top-1.5 p-1 rounded-md text-slate-400 hover:text-slate-700 hover:bg-slate-300/50 opacity-0 group-hover:opacity-100 focus:opacity-100 transition-opacity cursor-pointer"
               >
-                <Trash2 className="w-3.5 h-3.5" />
+                <MoreVertical className="w-3.5 h-3.5" />
               </button>
             </div>
           );
@@ -792,6 +1006,165 @@ export const AiChatView: React.FC<AiChatViewProps> = ({
           </form>
         </div>
       </div>
+
+      {/* Custom Context Menu for Conversation (Desktop Right-Click / Mobile Long-Press) */}
+      {contextMenu && activeConvForMenu && (
+        <div
+          data-chat-context-menu
+          style={{ left: contextMenu.x, top: contextMenu.y }}
+          className="fixed z-50 w-48 rounded-xl bg-white/95 backdrop-blur-md border border-slate-200 shadow-xl shadow-slate-900/10 p-1.5 text-xs text-slate-800 animate-in fade-in zoom-in-95 duration-100 select-none"
+        >
+          <div className="px-2.5 py-1.5 text-[11px] font-medium text-slate-400 border-b border-slate-100 truncate mb-1">
+            {activeConvForMenu.title}
+          </div>
+
+          {/* 1. Rename */}
+          <button
+            type="button"
+            onClick={() => handleOpenRename(activeConvForMenu)}
+            className="w-full text-left px-2.5 py-1.5 rounded-lg hover:bg-slate-100 flex items-center gap-2 cursor-pointer transition-colors text-slate-700 hover:text-slate-900 font-medium"
+          >
+            <Pencil className="w-3.5 h-3.5 text-slate-500" />
+            <span>{t(interfaceLanguage, 'renameChatLabel')}</span>
+          </button>
+
+          {/* 2. Pin / Unpin */}
+          <button
+            type="button"
+            onClick={() => handleTogglePin(activeConvForMenu)}
+            className="w-full text-left px-2.5 py-1.5 rounded-lg hover:bg-slate-100 flex items-center gap-2 cursor-pointer transition-colors text-slate-700 hover:text-slate-900 font-medium"
+          >
+            {activeConvForMenu.pinned ? (
+              <>
+                <PinOff className="w-3.5 h-3.5 text-amber-500" />
+                <span>{t(interfaceLanguage, 'unpinChatLabel')}</span>
+              </>
+            ) : (
+              <>
+                <Pin className="w-3.5 h-3.5 text-amber-500" />
+                <span>{t(interfaceLanguage, 'pinChatLabel')}</span>
+              </>
+            )}
+          </button>
+
+          <div className="h-px bg-slate-100 my-1" />
+
+          {/* 3. Delete */}
+          <button
+            type="button"
+            onClick={() => handleOpenDelete(activeConvForMenu)}
+            className="w-full text-left px-2.5 py-1.5 rounded-lg hover:bg-rose-50 text-rose-600 flex items-center gap-2 cursor-pointer transition-colors font-medium"
+          >
+            <Trash2 className="w-3.5 h-3.5 text-rose-500" />
+            <span>{t(interfaceLanguage, 'deleteChatLabel')}</span>
+          </button>
+        </div>
+      )}
+
+      {/* Rename Conversation Modal */}
+      {renameModal && (
+        <div
+          className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-900/40 backdrop-blur-xs animate-in fade-in duration-150"
+          onClick={() => setRenameModal(null)}
+        >
+          <div
+            className="w-full max-w-sm rounded-2xl bg-white border border-slate-200 shadow-2xl p-5 space-y-4 animate-in zoom-in-95 duration-150"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div className="flex items-center justify-between">
+              <h3 className="text-sm font-semibold text-slate-900 flex items-center gap-2">
+                <Pencil className="w-4 h-4 text-slate-600" />
+                <span>{t(interfaceLanguage, 'renameChatTitle')}</span>
+              </h3>
+              <button
+                type="button"
+                onClick={() => setRenameModal(null)}
+                className="p-1 rounded-lg text-slate-400 hover:text-slate-700 hover:bg-slate-100 transition-colors cursor-pointer"
+              >
+                <X className="w-4 h-4" />
+              </button>
+            </div>
+
+            <form onSubmit={handleSaveRename} className="space-y-4">
+              <div>
+                <input
+                  ref={renameInputRef}
+                  type="text"
+                  value={renameInput}
+                  onChange={(e) => setRenameInput(e.target.value)}
+                  placeholder={t(interfaceLanguage, 'renamePlaceholder')}
+                  maxLength={100}
+                  className="w-full px-3 py-2 text-xs rounded-xl border border-slate-300 focus:outline-none focus:ring-2 focus:ring-slate-900 focus:border-slate-900 transition-all text-slate-900 placeholder:text-slate-400"
+                />
+              </div>
+
+              <div className="flex items-center justify-end gap-2 pt-1">
+                <button
+                  type="button"
+                  onClick={() => setRenameModal(null)}
+                  className="px-3.5 py-1.5 rounded-lg text-xs font-medium text-slate-600 hover:bg-slate-100 transition-colors cursor-pointer"
+                >
+                  {t(interfaceLanguage, 'cancelBtn')}
+                </button>
+                <button
+                  type="submit"
+                  disabled={!renameInput.trim()}
+                  className="px-4 py-1.5 rounded-lg text-xs font-semibold bg-slate-900 text-white hover:bg-slate-800 disabled:opacity-50 disabled:cursor-not-allowed transition-colors cursor-pointer"
+                >
+                  {t(interfaceLanguage, 'saveBtn')}
+                </button>
+              </div>
+            </form>
+          </div>
+        </div>
+      )}
+
+      {/* Delete Confirmation Modal */}
+      {deleteModal && (
+        <div
+          className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-900/40 backdrop-blur-xs animate-in fade-in duration-150"
+          onClick={() => setDeleteModal(null)}
+        >
+          <div
+            className="w-full max-w-sm rounded-2xl bg-white border border-slate-200 shadow-2xl p-5 space-y-4 animate-in zoom-in-95 duration-150"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div className="flex items-start gap-3">
+              <div className="p-2.5 rounded-xl bg-rose-50 border border-rose-100 text-rose-600 shrink-0">
+                <Trash2 className="w-5 h-5" />
+              </div>
+              <div className="space-y-1">
+                <h3 className="text-sm font-semibold text-slate-900">
+                  {t(interfaceLanguage, 'deleteChatConfirmTitle')}
+                </h3>
+                <p className="text-xs text-slate-600 leading-relaxed">
+                  {t(interfaceLanguage, 'deleteChatConfirmDesc')}
+                </p>
+                <p className="text-[11px] font-medium text-slate-700 truncate pt-1 bg-slate-50 px-2 py-1 rounded border border-slate-100">
+                  "{deleteModal.title}"
+                </p>
+              </div>
+            </div>
+
+            <div className="flex items-center justify-end gap-2 pt-2">
+              <button
+                type="button"
+                onClick={() => setDeleteModal(null)}
+                className="px-3.5 py-1.5 rounded-lg text-xs font-medium text-slate-600 hover:bg-slate-100 transition-colors cursor-pointer"
+              >
+                {t(interfaceLanguage, 'cancelBtn')}
+              </button>
+              <button
+                type="button"
+                onClick={handleConfirmDelete}
+                className="px-4 py-1.5 rounded-lg text-xs font-semibold bg-rose-600 text-white hover:bg-rose-700 transition-colors shadow-xs cursor-pointer"
+              >
+                {t(interfaceLanguage, 'deleteChatLabel')}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 };

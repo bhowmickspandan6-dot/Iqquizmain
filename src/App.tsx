@@ -246,12 +246,23 @@ export default function App() {
   const effectiveUserId = currentUser?.uid || clientUid;
   const userChatStorageKey = `${STORAGE_KEYS.CHATS_PREFIX}${effectiveUserId}`;
 
+  function sortConversationsWithPinned(list: ChatConversation[]): ChatConversation[] {
+    return [...list].sort((a, b) => {
+      const aPinned = Boolean(a.pinned);
+      const bPinned = Boolean(b.pinned);
+      if (aPinned !== bPinned) {
+        return aPinned ? -1 : 1;
+      }
+      return String(b.updatedAt || '').localeCompare(String(a.updatedAt || ''));
+    });
+  }
+
   // Per-User Isolated AI Chat Conversations & Active Chat State
   const [chatConversations, setChatConversations] = useState<ChatConversation[]>(() => {
     try {
       const raw = localStorage.getItem(`${STORAGE_KEYS.CHATS_PREFIX}${clientUid}`);
       const parsed = raw ? JSON.parse(raw) : [];
-      return Array.isArray(parsed) ? parsed : [];
+      return Array.isArray(parsed) ? sortConversationsWithPinned(parsed) : [];
     } catch {
       return [];
     }
@@ -264,7 +275,9 @@ export default function App() {
       const raw = localStorage.getItem(userChatStorageKey);
       const localList: ChatConversation[] = raw ? JSON.parse(raw) : [];
       const validList = Array.isArray(localList)
-        ? localList.filter((c) => c && c.chatId && (!c.userId || c.userId === effectiveUserId))
+        ? sortConversationsWithPinned(
+            localList.filter((c) => c && c.chatId && (!c.userId || c.userId === effectiveUserId))
+          )
         : [];
       setChatConversations(validList);
       setActiveChatId(validList.length > 0 ? validList[0].chatId : null);
@@ -290,13 +303,14 @@ export default function App() {
               if (s && s.chatId && s.userId === effectiveUserId) {
                 const existing = map.get(s.chatId);
                 if (!existing || (s.messages?.length || 0) >= (existing.messages?.length || 0)) {
-                  map.set(s.chatId, s);
+                  map.set(s.chatId, {
+                    ...s,
+                    pinned: existing?.pinned !== undefined ? existing.pinned : s.pinned,
+                  });
                 }
               }
             }
-            const merged = Array.from(map.values()).sort((a, b) =>
-              String(b.updatedAt || '').localeCompare(String(a.updatedAt || ''))
-            );
+            const merged = sortConversationsWithPinned(Array.from(map.values()));
             try {
               localStorage.setItem(userChatStorageKey, JSON.stringify(merged));
             } catch {
@@ -338,9 +352,7 @@ export default function App() {
         next = [...prev];
         next[idx] = taggedConv;
       }
-      return next.sort((a, b) =>
-        String(b.updatedAt || '').localeCompare(String(a.updatedAt || ''))
-      );
+      return sortConversationsWithPinned(next);
     });
     setActiveChatId(taggedConv.chatId);
 
