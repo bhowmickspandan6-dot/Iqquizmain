@@ -10,7 +10,7 @@
       "destination": "/api/index?__path=$1"
     },
     {
-      "source": "/((?!api/).*)",
+      "source": "/((?!api/|sitemap\\.xml|robots\\.txt|.*\\.[\\w]+$).*)",
       "destination": "/index.html"
     }
   ]

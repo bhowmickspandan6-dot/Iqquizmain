@@ -12,8 +12,16 @@ const PORT = Number(process.env.PORT) || 3000;
 
 app.use(express.json({ limit: '15mb' }));
 
-// Delegate all /api/* routes to the universal serverless handler
+// Delegate all /api/* routes and sitemap/robots to the universal serverless handler
 app.all('/api/*', async (req, res) => {
+  await apiHandler(req, res);
+});
+
+app.get('/sitemap.xml', async (req, res) => {
+  await apiHandler(req, res);
+});
+
+app.get('/robots.txt', async (req, res) => {
   await apiHandler(req, res);
 });
 

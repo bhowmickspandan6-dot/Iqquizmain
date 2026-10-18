@@ -4036,6 +4036,32 @@ export default async function handler(req: any, res: any) {
       return;
     }
 
+    // Direct / Fallback XML Sitemap Endpoint (guarantees valid application/xml sitemap protocol 0.9)
+    if (method === 'GET' && (routePath === '/sitemap.xml' || routePath === '/api/sitemap.xml')) {
+      res.statusCode = 200;
+      res.setHeader('Content-Type', 'application/xml; charset=utf-8');
+      res.setHeader('Cache-Control', 'public, max-age=3600, s-maxage=86400');
+      res.end(`<?xml version="1.0" encoding="UTF-8"?>
+<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">
+  <url>
+    <loc>https://iqquizz.vercel.app/</loc>
+    <lastmod>2026-10-18</lastmod>
+    <changefreq>daily</changefreq>
+    <priority>1.0</priority>
+  </url>
+</urlset>`);
+      return;
+    }
+
+    // Direct / Fallback robots.txt Endpoint
+    if (method === 'GET' && (routePath === '/robots.txt' || routePath === '/api/robots.txt')) {
+      res.statusCode = 200;
+      res.setHeader('Content-Type', 'text/plain; charset=utf-8');
+      res.setHeader('Cache-Control', 'public, max-age=3600, s-maxage=86400');
+      res.end(`User-agent: *\nAllow: /\n\nSitemap: https://iqquizz.vercel.app/sitemap.xml\n`);
+      return;
+    }
+
     // 1. Health & AI Status Endpoint
     if (method === 'GET' && routePath === '/api/ai/status') {
       const hasKey = Boolean(getServerApiKey());
