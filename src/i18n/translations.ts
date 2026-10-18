@@ -8,7 +8,7 @@ export const LANGUAGE_LABELS: Record<LanguageCode, string> = {
 
 export const UI_TRANSLATIONS: Record<LanguageCode, Record<string, string>> = {
   en: {
-    brandName: 'IQ Quiz',
+    brandName: 'iQ Quizz',
     tagline: 'Learn Better. Practice Smarter.',
     // Navigation
     navDashboard: 'Dashboard',
@@ -60,9 +60,9 @@ export const UI_TRANSLATIONS: Record<LanguageCode, Record<string, string>> = {
     independenceNote:
       'Interface Language, Quiz Language, and Subject are completely independent. Changing one never alters the others.',
     // Dashboard
-    welcomeHeading: 'IQ Quiz — Academic Study & Assessment Workspace',
+    welcomeHeading: 'iQ Quizz – Online IQ Quiz & Academic Platform',
     welcomeSub:
-      'Select your class, subject, and preferred quiz language to generate unique, curriculum-verified assessments with strict answer locking.',
+      'Practice online IQ quizzes, timed tests, and curriculum-verified assessments for Classes 5–10 in English, Bengali, and Hindi with answer locking.',
     statQuizzesCompleted: 'Quizzes Completed',
     statAverageScore: 'Average Score',
     statUniqueQuestionsSeen: 'Unique Questions Tracked',
@@ -281,7 +281,7 @@ export const UI_TRANSLATIONS: Record<LanguageCode, Record<string, string>> = {
     hideHintBtn: 'Hide Study Hint',
   },
   bn: {
-    brandName: 'IQ Quiz',
+    brandName: 'iQ Quizz',
     tagline: 'আরও ভালো শিখুন। আরও স্মার্ট অনুশীলন করুন।',
     navDashboard: 'ড্যাশবোর্ড',
     navAiChat: 'এআই চ্যাট (AI Chat)',
@@ -328,9 +328,9 @@ export const UI_TRANSLATIONS: Record<LanguageCode, Record<string, string>> = {
     syncedCloud: 'ক্লাউড সিঙ্ক সক্রিয়',
     independenceNote:
       'ওয়েবসাইটের ভাষা, কুইজের ভাষা এবং বিষয় সম্পূর্ণ স্বাধীন। একটি পরিবর্তন করলে অন্য দুটি কখনোই পরিবর্তিত হবে না।',
-    welcomeHeading: 'IQ Quiz — একাডেমিক স্টাডি ও মূল্যায়ন প্ল্যাটফর্ম',
+    welcomeHeading: 'iQ Quizz – অনলাইন আইকিউ কুইজ ও পাঠ্যক্রম প্ল্যাটফর্ম',
     welcomeSub:
-      'আপনার শ্রেণি, বিষয় এবং পছন্দের কুইজের ভাষা নির্বাচন করে নতুন প্রশ্ন ও কঠোর উত্তর-লকিং সহ অনুশীলন শুরু করুন।',
+      'আপনার শ্রেণি, বিষয় এবং পছন্দের কুইজের ভাষা নির্বাচন করে iQ Quizz-এ নতুন প্রশ্ন ও কঠোর উত্তর-লকিং সহ অনুশীলন শুরু করুন।',
     statQuizzesCompleted: 'সম্পন্ন কুইজ',
     statAverageScore: 'গড় স্কোর',
     statUniqueQuestionsSeen: 'অনন্য প্রশ্ন ট্র্যাকিং',
@@ -538,7 +538,7 @@ export const UI_TRANSLATIONS: Record<LanguageCode, Record<string, string>> = {
     hideHintBtn: 'সূত্র লুকান',
   },
   hi: {
-    brandName: 'IQ Quiz',
+    brandName: 'iQ Quizz',
     tagline: 'बेहतर सीखें। स्मार्ट अभ्यास करें।',
     navDashboard: 'डैशबोर्ड',
     navAiChat: 'एआई चैट (AI Chat)',
@@ -585,9 +585,9 @@ export const UI_TRANSLATIONS: Record<LanguageCode, Record<string, string>> = {
     syncedCloud: 'क्लाउड सिंक सक्रिय',
     independenceNote:
       'इंटरफ़ेस भाषा, क्विज़ भाषा और विषय पूरी तरह से स्वतंत्र हैं। किसी एक को बदलने से अन्य दो कभी नहीं बदलते।',
-    welcomeHeading: 'IQ Quiz — शैक्षणिक अध्ययन और मूल्यांकन मंच',
+    welcomeHeading: 'iQ Quizz – ऑनलाइन आईक्यू क्विज़ एवं शैक्षणिक मंच',
     welcomeSub:
-      'अद्वितीय, पाठ्यक्रम-आधारित प्रश्न और सख्त उत्तर-लॉकिंग के साथ अभ्यास शुरू करने के लिए अपनी कक्षा, विषय और क्विज़ भाषा चुनें।',
+      'कक्षा 5–10 के लिए English, বাংলা और हिन्दी में ऑनलाइन आईक्यू क्विज़, समयबद्ध टेस्ट और विषय-वार अध्ययन का अभ्यास करें।',
     statQuizzesCompleted: 'पूर्ण किए गए क्विज़',
     statAverageScore: 'औसत स्कोर',
     statUniqueQuestionsSeen: 'अद्वितीय प्रश्न ट्रैक किए गए',

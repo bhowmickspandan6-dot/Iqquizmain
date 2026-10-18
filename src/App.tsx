@@ -2193,6 +2193,114 @@ export default function App() {
                 </div>
               </div>
 
+              {/* Important Quiz Feature Quick Links (SEO & Crawlability) */}
+              <div className="bg-white border border-slate-200 rounded-xl p-5 sm:p-6 space-y-4">
+                <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2">
+                  <div>
+                    <h2 className="text-base sm:text-lg font-bold text-slate-900">
+                      Explore iQ Quizz Online Learning &amp; Assessment Features
+                    </h2>
+                    <p className="text-xs sm:text-sm text-slate-600">
+                      Access all key academic modules, practice tests, and revision tools on iQ Quizz.
+                    </p>
+                  </div>
+                </div>
+
+                <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3.5">
+                  <a
+                    href="#take_quiz"
+                    onClick={(e) => {
+                      e.preventDefault();
+                      setActiveNav('take_quiz');
+                      window.scrollTo({ top: 0, behavior: 'smooth' });
+                    }}
+                    className="p-3.5 rounded-xl border border-slate-200 hover:border-indigo-300 hover:bg-indigo-50/40 transition-all flex flex-col justify-between group cursor-pointer"
+                  >
+                    <div className="space-y-1.5">
+                      <div className="flex items-center gap-2 text-indigo-600 font-semibold text-xs">
+                        <PlayCircle className="w-4 h-4 shrink-0" />
+                        <span>Online IQ Quiz</span>
+                      </div>
+                      <p className="text-xs text-slate-600 leading-relaxed">
+                        Curriculum-locked academic quizzes with instant timer, hints, and explanations.
+                      </p>
+                    </div>
+                    <span className="text-[11px] font-semibold text-indigo-600 mt-3 flex items-center gap-1 group-hover:translate-x-0.5 transition-transform">
+                      Take Quiz <ArrowRight className="w-3 h-3" />
+                    </span>
+                  </a>
+
+                  <a
+                    href="#practice_tests"
+                    onClick={(e) => {
+                      e.preventDefault();
+                      setActiveNav('practice_tests');
+                      window.scrollTo({ top: 0, behavior: 'smooth' });
+                    }}
+                    className="p-3.5 rounded-xl border border-slate-200 hover:border-indigo-300 hover:bg-indigo-50/40 transition-all flex flex-col justify-between group cursor-pointer"
+                  >
+                    <div className="space-y-1.5">
+                      <div className="flex items-center gap-2 text-indigo-600 font-semibold text-xs">
+                        <ClipboardList className="w-4 h-4 shrink-0" />
+                        <span>Practice Tests</span>
+                      </div>
+                      <p className="text-xs text-slate-600 leading-relaxed">
+                        Timed mock assessments and full question sets designed for school exam revision.
+                      </p>
+                    </div>
+                    <span className="text-[11px] font-semibold text-indigo-600 mt-3 flex items-center gap-1 group-hover:translate-x-0.5 transition-transform">
+                      View Tests <ArrowRight className="w-3 h-3" />
+                    </span>
+                  </a>
+
+                  <a
+                    href="#study_notes"
+                    onClick={(e) => {
+                      e.preventDefault();
+                      setActiveNav('study_notes');
+                      window.scrollTo({ top: 0, behavior: 'smooth' });
+                    }}
+                    className="p-3.5 rounded-xl border border-slate-200 hover:border-indigo-300 hover:bg-indigo-50/40 transition-all flex flex-col justify-between group cursor-pointer"
+                  >
+                    <div className="space-y-1.5">
+                      <div className="flex items-center gap-2 text-indigo-600 font-semibold text-xs">
+                        <BookOpenText className="w-4 h-4 shrink-0" />
+                        <span>Study Notes &amp; Flashcards</span>
+                      </div>
+                      <p className="text-xs text-slate-600 leading-relaxed">
+                        Textbook chapter summaries, key concepts, and study flashcards in three languages.
+                      </p>
+                    </div>
+                    <span className="text-[11px] font-semibold text-indigo-600 mt-3 flex items-center gap-1 group-hover:translate-x-0.5 transition-transform">
+                      Open Notes <ArrowRight className="w-3 h-3" />
+                    </span>
+                  </a>
+
+                  <a
+                    href="#ai_chat"
+                    onClick={(e) => {
+                      e.preventDefault();
+                      setActiveNav('ai_chat');
+                      window.scrollTo({ top: 0, behavior: 'smooth' });
+                    }}
+                    className="p-3.5 rounded-xl border border-slate-200 hover:border-indigo-300 hover:bg-indigo-50/40 transition-all flex flex-col justify-between group cursor-pointer"
+                  >
+                    <div className="space-y-1.5">
+                      <div className="flex items-center gap-2 text-indigo-600 font-semibold text-xs">
+                        <MessageSquare className="w-4 h-4 shrink-0" />
+                        <span>iQ Quizz AI Tutor</span>
+                      </div>
+                      <p className="text-xs text-slate-600 leading-relaxed">
+                        Step-by-step doubt clearing and study assistance in English, বাংলা, or हिन्दी.
+                      </p>
+                    </div>
+                    <span className="text-[11px] font-semibold text-indigo-600 mt-3 flex items-center gap-1 group-hover:translate-x-0.5 transition-transform">
+                      Ask AI Tutor <ArrowRight className="w-3 h-3" />
+                    </span>
+                  </a>
+                </div>
+              </div>
+
               {/* Active Unfinished Quiz Banner (if student has an in-progress quiz) */}
               {activeAttempt && activeAttempt.status === 'in_progress' && (
                 <div className="bg-indigo-950 text-white rounded-xl p-5 flex flex-wrap items-center justify-between gap-4">
