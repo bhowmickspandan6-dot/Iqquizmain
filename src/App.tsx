@@ -1670,6 +1670,60 @@ export default function App() {
     };
   }, [generatingQuiz]);
 
+  // Lock background scrolling on mobile touchscreens and desktop when mobile menu drawer is open
+  useEffect(() => {
+    if (!mobileMenuOpen) return;
+
+    // Capture the current scroll position before locking
+    const scrollY = window.scrollY || document.documentElement.scrollTop || 0;
+    const prevBodyOverflow = document.body.style.overflow;
+    const prevHtmlOverflow = document.documentElement.style.overflow;
+    const prevBodyPosition = document.body.style.position;
+    const prevBodyTop = document.body.style.top;
+    const prevBodyWidth = document.body.style.width;
+
+    // Freeze both <html> and <body> so background cannot move or rubber-band
+    document.documentElement.style.overflow = 'hidden';
+    document.body.style.overflow = 'hidden';
+    document.body.style.position = 'fixed';
+    document.body.style.top = `-${scrollY}px`;
+    document.body.style.width = '100%';
+
+    // Prevent touch gestures outside the scrollable sidebar nav from moving the background
+    const preventBackgroundTouch = (e: TouchEvent) => {
+      const target = e.target as HTMLElement | null;
+      // Allow scrolling inside the drawer navigation list
+      if (target && target.closest('nav')) {
+        return;
+      }
+      if (e.cancelable) {
+        e.preventDefault();
+      }
+    };
+
+    window.addEventListener('touchmove', preventBackgroundTouch, { passive: false });
+
+    const handleResize = () => {
+      if (window.innerWidth >= 1024) {
+        setMobileMenuOpen(false);
+      }
+    };
+    window.addEventListener('resize', handleResize);
+
+    return () => {
+      window.removeEventListener('touchmove', preventBackgroundTouch);
+      window.removeEventListener('resize', handleResize);
+
+      document.documentElement.style.overflow = prevHtmlOverflow;
+      document.body.style.overflow = prevBodyOverflow;
+      document.body.style.position = prevBodyPosition;
+      document.body.style.top = prevBodyTop;
+      document.body.style.width = prevBodyWidth;
+
+      window.scrollTo(0, scrollY);
+    };
+  }, [mobileMenuOpen]);
+
   return (
     <MotionConfig reducedMotion="user">
       <div className="min-h-screen flex bg-[#F8FAFC] text-slate-900 select-none">
@@ -1845,15 +1899,19 @@ export default function App() {
         {/* Mobile Drawer Overlay with Smooth Opening & Closing Animation */}
         <AnimatePresence>
           {mobileMenuOpen && (
-            <div className="fixed inset-0 z-50 lg:hidden flex">
+            <div className="fixed inset-0 z-50 lg:hidden flex overscroll-contain">
               <motion.div
                 key="mobile-drawer-backdrop"
                 initial={{ opacity: 0 }}
                 animate={{ opacity: 1 }}
                 exit={{ opacity: 0 }}
                 transition={{ duration: 0.2 }}
-                className="fixed inset-0 bg-slate-900/60 backdrop-blur-xs"
+                className="fixed inset-0 bg-slate-900/60 backdrop-blur-xs touch-none"
                 onClick={() => setMobileMenuOpen(false)}
+                onTouchMove={(e) => {
+                  e.preventDefault();
+                  e.stopPropagation();
+                }}
               />
               <motion.div
                 key="mobile-drawer-panel"
@@ -1861,9 +1919,9 @@ export default function App() {
                 animate={{ x: 0 }}
                 exit={{ x: '-100%' }}
                 transition={{ duration: 0.24, ease: [0.22, 1, 0.36, 1] }}
-                className="relative w-64 max-w-xs bg-[#0F172A] text-white h-full flex flex-col z-10 shadow-2xl"
+                className="relative w-64 max-w-xs bg-[#0F172A] text-white h-full flex flex-col z-10 shadow-2xl overscroll-contain"
               >
-                <div className="px-5 py-4 border-b border-slate-800 flex items-center justify-between shrink-0">
+                <div className="px-5 py-4 border-b border-slate-800 flex items-center justify-between shrink-0 select-none">
                   <div className="flex items-center gap-2.5">
                     <span className="w-7 h-7 rounded-md bg-indigo-600 flex items-center justify-center text-white font-extrabold text-xs tracking-tight shrink-0">
                       IQ
@@ -1881,7 +1939,10 @@ export default function App() {
                     <X className="w-5 h-5" />
                   </button>
                 </div>
-                <nav className="flex-1 min-h-0 overflow-y-auto px-3 py-4 space-y-1">
+                <nav
+                  className="flex-1 min-h-0 overflow-y-auto overscroll-contain px-3 py-4 space-y-1"
+                  style={{ overscrollBehavior: 'contain', WebkitOverflowScrolling: 'touch' }}
+                >
                   {navItems.map((item, idx) => (
                     <motion.button
                       key={item.id}
@@ -1934,17 +1995,20 @@ export default function App() {
               <button
                 type="button"
                 onClick={() => setMobileMenuOpen(true)}
-                className="lg:hidden p-2 rounded-lg border border-slate-200 text-slate-700 hover:bg-slate-50 cursor-pointer shrink-0"
+                className="lg:hidden p-2 rounded-lg border border-slate-200 text-slate-700 bg-white hover:bg-slate-50 active:bg-slate-100 cursor-pointer shrink-0 z-10 shadow-2xs"
                 aria-label="Open navigation"
               >
-                <Menu className="w-5 h-5" />
+                <Menu className="w-5 h-5 text-slate-800" />
               </button>
-              <div className="flex items-center gap-1.5 sm:gap-2 text-sm font-bold text-slate-900 whitespace-nowrap min-w-0 flex-1">
+
+              <div className="flex items-center gap-1.5 sm:gap-2 text-sm font-bold text-slate-900 whitespace-nowrap min-w-0 py-0.5">
                 <span className="w-6 h-6 rounded-md bg-indigo-600 text-white text-[11px] font-extrabold flex items-center justify-center tracking-tight shrink-0">
                   IQ
                 </span>
-                <span className="shrink-0">{t(interfaceLanguage, 'brandName')}</span>
-                <span className="text-slate-300 font-normal shrink-0">/</span>
+                <span className="hidden sm:inline-flex items-center gap-1.5 shrink-0">
+                  <span>{t(interfaceLanguage, 'brandName')}</span>
+                  <span className="text-slate-300 font-normal">/</span>
+                </span>
                 <AnimatePresence mode="wait">
                   <motion.span
                     key={activeNav}
@@ -1957,6 +2021,16 @@ export default function App() {
                     {navItems.find((n) => n.id === activeNav)?.label}
                   </motion.span>
                 </AnimatePresence>
+
+                {/* “✨ Smart Learning” button beside “Dashboard” with a small 12–16px gap on the same line */}
+                <span
+                  aria-label="Smart Learning"
+                  title="Smart Learning"
+                  className="ml-2.5 sm:ml-3.5 inline-flex items-center justify-center gap-1 sm:gap-1.5 px-2.5 sm:px-3 py-1 sm:py-1.5 rounded-full bg-[#EFF6FF] text-[#2563EB] border border-[#BFDBFE] text-[10.5px] sm:text-xs font-semibold tracking-tight whitespace-nowrap select-none shadow-2xs md:hover:bg-[#DBEAFE] md:hover:border-[#93C5FD] transition-colors duration-200 shrink-0"
+                >
+                  <Sparkles className="w-3.5 h-3.5 text-[#2563EB] shrink-0" />
+                  <span className="text-[#2563EB]">Smart Learning</span>
+                </span>
               </div>
             </div>
 
@@ -2000,18 +2074,6 @@ export default function App() {
                   ))}
                 </select>
               </div>
-            </div>
-
-            {/* Zone 3: Compact Visual "Smart Learning" Badge (Non-clickable label) */}
-            <div className="flex items-center shrink-0">
-              <span
-                aria-label="Smart Learning"
-                title="Smart Learning"
-                className="inline-flex items-center justify-center gap-1 sm:gap-1.5 px-2 min-[360px]:px-2.5 sm:px-3.5 py-1 sm:py-1.5 rounded-full bg-[#EFF6FF] text-[#2563EB] border border-[#BFDBFE] text-[10.5px] min-[390px]:text-[11px] sm:text-xs font-semibold tracking-tight whitespace-nowrap select-none shadow-2xs md:hover:bg-[#DBEAFE] md:hover:border-[#93C5FD] transition-colors duration-200"
-              >
-                <Sparkles className="w-3.5 h-3.5 text-[#2563EB] shrink-0" />
-                <span className="hidden min-[360px]:inline text-[#2563EB]">Smart Learning</span>
-              </span>
             </div>
           </header>
 
